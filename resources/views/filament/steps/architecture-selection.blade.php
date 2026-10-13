@@ -108,6 +108,7 @@
                                     <div>
                                         <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Containers per SUT <span class="text-red-500">*</span></label>
                                         <input type="number" x-model.number="fields.containers_per_sut" @change="$wire.set('data.containers_per_sut', fields.containers_per_sut)" min="1" max="20" class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-white focus:border-primary-500 focus:ring-1 focus:ring-primary-500"/>
+                                        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">How many containers feed one step-up transformer (SUT). e.g. 4</p>
                                     </div>
                                     <div>
                                         <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">AC Cable Type &mdash; Container to SUT <span class="text-red-500">*</span></label>
@@ -155,11 +156,12 @@
                                     <div>
                                         <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Batteries per PCS <span class="text-red-500">*</span></label>
                                         <input type="number" x-model.number="fields.batteries_per_pcs" @change="$wire.set('data.batteries_per_pcs', fields.batteries_per_pcs)" min="1" max="20" placeholder="e.g. 3" class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-white focus:border-primary-500 focus:ring-1 focus:ring-primary-500"/>
+                                        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">How many batteries one PCS (inverter) serves. e.g. 2 batteries per PCS</p>
                                     </div>
                                     <div>
                                         <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">PCS per SUT</label>
                                         <input type="number" value="1" disabled class="w-full rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-100 dark:bg-gray-900 px-3 py-2 text-sm text-gray-400 cursor-not-allowed"/>
-                                        <p class="mt-1 text-xs text-gray-400">Fixed at 1 for this architecture</p>
+                                        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">Fixed at 1: each PCS has its own step-up transformer</p>
                                     </div>
                                     <div>
                                         <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">PCS Unit Type <span class="text-red-500">*</span></label>
@@ -206,11 +208,12 @@
                                     <div>
                                         <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Batteries per PCS <span class="text-red-500">*</span></label>
                                         <input type="number" x-model.number="fields.batteries_per_pcs" @change="$wire.set('data.batteries_per_pcs', fields.batteries_per_pcs)" min="1" max="20" placeholder="e.g. 3" class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-white focus:border-primary-500 focus:ring-1 focus:ring-primary-500"/>
+                                        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">How many batteries one PCS (inverter) serves. e.g. 2 batteries per PCS</p>
                                     </div>
                                     <div>
                                         <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">PCS per SUT <span class="text-red-500">*</span></label>
                                         <input type="number" x-model.number="fields.pcs_per_sut" @change="$wire.set('data.pcs_per_sut', fields.pcs_per_sut)" min="2" max="10" placeholder="e.g. 2" class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-white focus:border-primary-500 focus:ring-1 focus:ring-primary-500"/>
-                                        <p class="mt-1 text-xs text-gray-400">Minimum 2 for this architecture</p>
+                                        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">How many PCS units share one step-up transformer. Minimum 2. e.g. 2</p>
                                     </div>
                                     <div>
                                         <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">PCS Unit Type <span class="text-red-500">*</span></label>
@@ -289,7 +292,7 @@
                                     <div>
                                         <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Blocks per Shared SUT <span class="text-red-500">*</span></label>
                                         <input type="number" x-model.number="fields.blocks_per_cluster_sut" @change="$wire.set('data.blocks_per_cluster_sut', fields.blocks_per_cluster_sut)" min="2" max="10" placeholder="e.g. 2" class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-white focus:border-primary-500 focus:ring-1 focus:ring-primary-500"/>
-                                        <p class="mt-1 text-xs text-gray-400">Minimum 2 blocks per shared SUT</p>
+                                        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">How many blocks feed one shared step-up transformer. Minimum 2. e.g. 2</p>
                                     </div>
                                     <div>
                                         <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">AC Cable Type &mdash; PCS to SUT <span class="text-red-500">*</span></label>

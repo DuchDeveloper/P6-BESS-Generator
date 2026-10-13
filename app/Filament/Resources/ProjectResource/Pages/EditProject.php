@@ -4,9 +4,12 @@ declare(strict_types=1);
 
 namespace App\Filament\Resources\ProjectResource\Pages;
 
+use App\Enums\BessArchitecture;
 use App\Enums\BlockSequencingMode;
 use App\Enums\DeliveryModel;
 use App\Filament\Resources\ProjectResource;
+use App\Filament\Resources\ProjectResource\Schemas\TopologyHelp;
+use App\Services\Bess\TopologyService;
 use Filament\Actions;
 use Filament\Forms\Components\DatePicker;
 use Filament\Forms\Components\Select;
@@ -17,6 +20,7 @@ use Filament\Schemas\Components\Grid;
 use Filament\Schemas\Components\Section;
 use Filament\Schemas\Components\Utilities\Get;
 use Filament\Forms\Components\Placeholder;
+use Filament\Notifications\Notification;
 use Filament\Resources\Pages\EditRecord;
 use Filament\Schemas\Schema;
 use Illuminate\Support\HtmlString;
@@ -27,6 +31,8 @@ class EditProject extends EditRecord
 
     public function form(Schema $schema): Schema
     {
+        $containers = $this->record->bess_architecture === BessArchitecture::IntegratedContainer;
+
         return $schema
             ->components([
                 Section::make('Project Details')
@@ -137,15 +143,46 @@ class EditProject extends EditRecord
                             ->native(false),
                     ]),
                 Section::make('Topology')
+                    ->description('Saving new counts rebuilds the zones and blocks. Run Build Schedule afterwards to update the schedule.')
                     ->schema([
-                        Grid::make(3)->schema([
-                            TextInput::make('zone_count')->numeric()->required()->minValue(1),
-                            TextInput::make('blocks_per_zone')->numeric()->required()->minValue(1),
-                            TextInput::make('battery_groups_per_block')->numeric()->required()->minValue(1),
-                            TextInput::make('pcs_groups_per_block')->numeric()->required()->minValue(1),
-                            TextInput::make('batteries_per_group')->numeric()->required()->minValue(1),
-                            TextInput::make('pcs_per_group')->numeric()->required()->minValue(1),
-                            TextInput::make('suts_per_block')->numeric()->required()->minValue(1),
+                        TopologyHelp::guide($this->record->bess_architecture?->value),
+                        TextInput::make('total_battery_count')
+                            ->label($containers ? 'Total Container Count' : 'Total Battery Count')
+                            ->helperText(TopologyHelp::for('total_battery_count', $containers))
+                            ->numeric()
+                            ->minValue(1),
+                        Grid::make(2)->schema([
+                            TextInput::make('zone_count')
+                                ->label('Zones')
+                                ->helperText(TopologyHelp::for('zone_count'))
+                                ->numeric()->required()->minValue(1),
+                            TextInput::make('blocks_per_zone')
+                                ->label('Blocks per Zone')
+                                ->helperText(TopologyHelp::for('blocks_per_zone'))
+                                ->numeric()->required()->minValue(1),
+                            TextInput::make('batteries_per_group')
+                                ->label($containers ? 'Containers per Group' : 'Batteries per Group')
+                                ->helperText(TopologyHelp::for('batteries_per_group', $containers))
+                                ->numeric()->required()->minValue(1),
+                            TextInput::make('battery_groups_per_block')
+                                ->label($containers ? 'Container Groups per Block' : 'Battery Groups per Block')
+                                ->helperText(TopologyHelp::for('battery_groups_per_block', $containers))
+                                ->numeric()->required()->minValue(1),
+                            TextInput::make('pcs_per_group')
+                                ->label('PCS per Group')
+                                ->helperText(TopologyHelp::for('pcs_per_group'))
+                                ->numeric()->required()->minValue(1)
+                                ->hidden($containers),
+                            TextInput::make('pcs_groups_per_block')
+                                ->label('PCS Groups per Block')
+                                ->helperText(TopologyHelp::for('pcs_groups_per_block'))
+                                ->numeric()->required()->minValue(1)
+                                ->hidden($containers),
+                            TextInput::make('suts_per_block')
+                                ->label('SUTs per Block')
+                                ->helperText(TopologyHelp::for('suts_per_block'))
+                                ->numeric()->required()->minValue(1)
+                                ->hidden($this->record->bess_architecture === BessArchitecture::NoSut),
                         ]),
                     ]),
                 Section::make('Block Sequencing')
@@ -231,6 +268,31 @@ class EditProject extends EditRecord
                         ]),
                     ]),
             ]);
+    }
+
+    /**
+     * Zones and blocks are copied from the topology counts when they're first
+     * initialised. When the counts change, rebuild them so the next schedule
+     * build uses the new layout.
+     */
+    protected function afterSave(): void
+    {
+        $topologyFields = [
+            'zone_count', 'blocks_per_zone', 'batteries_per_group', 'battery_groups_per_block',
+            'pcs_per_group', 'pcs_groups_per_block', 'suts_per_block',
+        ];
+
+        if (! $this->record->wasChanged($topologyFields) || ! $this->record->zoneConfigurations()->exists()) {
+            return;
+        }
+
+        app(TopologyService::class)->initializeFromDefaults($this->record);
+
+        Notification::make()
+            ->title('Zones and blocks updated')
+            ->body('Run Build Schedule on the Manage page to update the schedule.')
+            ->info()
+            ->send();
     }
 
     protected function getHeaderActions(): array

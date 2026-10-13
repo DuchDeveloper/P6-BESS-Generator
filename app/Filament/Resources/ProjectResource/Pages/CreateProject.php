@@ -7,6 +7,7 @@ namespace App\Filament\Resources\ProjectResource\Pages;
 use App\Enums\BlockSequencingMode;
 use App\Enums\DeliveryModel;
 use App\Filament\Resources\ProjectResource;
+use App\Filament\Resources\ProjectResource\Schemas\TopologyHelp;
 use App\Services\Bess\ProjectSetupService;
 use Filament\Forms\Components\DatePicker;
 use Filament\Forms\Components\Hidden;
@@ -144,19 +145,20 @@ class CreateProject extends CreateRecord
                     ->description('Configure zones, blocks, and equipment groupings for your selected architecture.')
                     ->visible($hasArch)
                     ->schema([
+                        TopologyHelp::guide(),
+
                         TextInput::make('total_battery_count')
                             ->label(fn (Get $get) => $pcsIntegrated($get)
                                 ? 'Total Container Count'
                                 : 'Total Battery Count')
                             ->numeric()
-                            ->placeholder('e.g., 160')
-                            ->helperText(fn (Get $get) => $pcsIntegrated($get)
-                                ? 'Total containers across all zones and blocks.'
-                                : 'Total batteries across all zones and blocks. Used for reconciliation validation.'),
+                            ->placeholder('e.g., 80')
+                            ->helperText(fn (Get $get) => TopologyHelp::for('total_battery_count', $pcsIntegrated($get))),
 
                         Grid::make(3)->schema([
                             TextInput::make('zone_count')
                                 ->label('Zones')
+                                ->helperText(TopologyHelp::for('zone_count'))
                                 ->numeric()
                                 ->default(1)
                                 ->minValue(1)
@@ -164,6 +166,7 @@ class CreateProject extends CreateRecord
                                 ->required(),
                             TextInput::make('blocks_per_zone')
                                 ->label('Blocks per Zone')
+                                ->helperText(TopologyHelp::for('blocks_per_zone'))
                                 ->numeric()
                                 ->default(1)
                                 ->minValue(1)
@@ -176,6 +179,7 @@ class CreateProject extends CreateRecord
                                 ->label(fn (Get $get) => $pcsIntegrated($get)
                                     ? 'Containers per Group'
                                     : 'Batteries per Group')
+                                ->helperText(fn (Get $get) => TopologyHelp::for('batteries_per_group', $pcsIntegrated($get)))
                                 ->numeric()
                                 ->default(4)
                                 ->minValue(1)
@@ -185,6 +189,7 @@ class CreateProject extends CreateRecord
                                 ->label(fn (Get $get) => $pcsIntegrated($get)
                                     ? 'Container Groups per Block'
                                     : 'Battery Groups per Block')
+                                ->helperText(fn (Get $get) => TopologyHelp::for('battery_groups_per_block', $pcsIntegrated($get)))
                                 ->numeric()
                                 ->default(5)
                                 ->minValue(1)
@@ -197,6 +202,7 @@ class CreateProject extends CreateRecord
                             ->schema([
                                 TextInput::make('pcs_per_group')
                                     ->label('PCS per Group')
+                                    ->helperText(TopologyHelp::for('pcs_per_group'))
                                     ->numeric()
                                     ->default(2)
                                     ->minValue(1)
@@ -204,6 +210,7 @@ class CreateProject extends CreateRecord
                                     ->required(fn (Get $get) => !$pcsIntegrated($get)),
                                 TextInput::make('pcs_groups_per_block')
                                     ->label('PCS Groups per Block')
+                                    ->helperText(TopologyHelp::for('pcs_groups_per_block'))
                                     ->numeric()
                                     ->default(5)
                                     ->minValue(1)
@@ -217,6 +224,7 @@ class CreateProject extends CreateRecord
                             ->schema([
                                 TextInput::make('suts_per_block')
                                     ->label('SUTs per Block')
+                                    ->helperText(TopologyHelp::for('suts_per_block'))
                                     ->numeric()
                                     ->default(2)
                                     ->minValue(1)
