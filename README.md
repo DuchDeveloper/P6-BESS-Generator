@@ -1,58 +1,107 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# BESS Schedule Generator
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+A rule-driven schedule logic engine for battery energy storage (BESS) projects.
+It takes a project configuration — delivery model, site topology, scope flags —
+and compiles a dependency-connected schedule graph that exports to Primavera P6
+(XER), CSV or JSON.
 
-## About Laravel
+`CLAUDE.md` is the governing specification: read it before changing an engine.
+The topic notes (`WBS.md`, `BOP.md`, `Transformer.md`, `civil.md`, …) carry the
+discipline detail behind the seeded package library.
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+**Stack:** Laravel 13 · Filament 5 · Tailwind CSS · Alpine.js · Pest · PHP 8.4
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
-
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
-
-## Learning Laravel
-
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework.
-
-In addition, [Laracasts](https://laracasts.com) contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
-
-You can also watch bite-sized lessons with real-world projects on [Laravel Learn](https://laravel.com/learn), where you will be guided through building a Laravel application from scratch while learning PHP fundamentals.
-
-## Agentic Development
-
-Laravel's predictable structure and conventions make it ideal for AI coding agents like Claude Code, Cursor, and GitHub Copilot. Install [Laravel Boost](https://laravel.com/docs/ai) to supercharge your AI workflow:
+## Getting started
 
 ```bash
-composer require laravel/boost --dev
-
-php artisan boost:install
+composer setup              # install, .env, key, migrate, build assets
+php artisan db:seed         # test user + the full package template library
+composer dev                # server, queue worker and Vite together
 ```
 
-Boost provides your agent 15+ tools and skills that help agents build Laravel applications while following best practices.
+Sign in at `/admin` as `test@example.com` / `password` (created by the seeder —
+change it, or create your own user with `php artisan make:filament-user`).
 
-## Contributing
+The default `.env.example` points at MySQL. SQLite works too: set
+`DB_CONNECTION=sqlite` and remove the other `DB_*` lines.
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+## How a schedule is built
 
-## Code of Conduct
+Create a project with the wizard (**Projects → New**), then on its **Manage** page:
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+1. **Init Topology** and **Instantiate Packages** (first time only): zones and
+   blocks from the project defaults, then package instances from the template
+   library with the conditional flags applied.
+2. Review the package table: select or deselect packages and set ownership.
+3. **Build Schedule**: resolve, compile and validate in one go. Run it again
+   after any change in the table.
+4. **Export**: XER, CSV or JSON.
 
-## Security Vulnerabilities
+The **Steps** menu runs the individual engines:
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+| Step | Engine |
+|------|--------|
+| 2. Apply Delivery Model | `DeliveryModelService`: EPC, BOP free-issued, owner design, construct only, split contract |
+| 3. Resolve Dependencies | `DependencyResolverService`: a provider for every required `output_key` |
+| 4. Compile Schedule | `GraphCompilerService`: activities, relationships, boundary milestones, topology, roll-up closures |
+| 5. Validate | `ValidationService`: the rules in `app/Services/Bess/Validation` |
 
-## License
+### Rules the engine keeps
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+- **Dependencies attach to outputs, never to packages.** A consumer requires an
+  `output_key`. The resolver finds whichever active package provides it:
+  - an internal package provides it itself;
+  - an **external** package provides it through a boundary receipt milestone;
+  - an **included elsewhere** package provides it through its containing package;
+  - a **not applicable** package's outputs aren't required at all.
+- **Design reviews pick up their predecessors dynamically.** Each review is
+  linked to every selected discipline package at its maturity level (30 / 60 /
+  90 / IFC).
+- **No open ends.**
+  - A milestone that drives nothing downstream rolls up to its phase closure
+    (for example *Construction Complete*).
+  - Every phase closure rolls up to a single **Project Complete** milestone.
+  - The first activity (NTP) carries a Start On or After constraint at the
+    project start date.
+  - So does any external receipt that nothing drives; replace that date with the
+    contractual receipt date in P6.
+- **Critical errors block export.** Export re-runs validation on the schedule as
+  it stands, and refuses if any critical error remains. Warnings and notes can be
+  acknowledged on the Manage page; critical errors can only be fixed.
+
+### Validation
+
+| Rule | Severity |
+|------|----------|
+| MissingOutputProviderRule: every required output has a provider | Critical |
+| OpenStartRule / OpenFinishRule: no activity without a predecessor / successor | Critical |
+| OrphanMilestoneRule: no milestone with no links at all | Critical |
+| InvalidPackageCombinationRule: "included elsewhere" points at an active package | Critical |
+| EnergisationPrerequisiteRule: energisation milestones have every prerequisite | Critical |
+| SuppressedOutputRule: a suppressed package isn't needed by an active one | Critical |
+| BatteryCountReconciliationRule: block battery counts add up to the project total | Critical |
+| MissingCompletionRollupRule: a package completion that drives nothing is a warning; one that only rolls up to its phase closure is a note to review | Warning / Info |
+
+## Reports
+
+From **Manage → Basis of Schedule** (signed-in users only):
+
+- Basis of Schedule: an LLM-drafted narrative, viewable as HTML, PDF or Word.
+  Configure the provider in `config/prism.php`.
+- Summary Gantt: HTML or PowerPoint.
+
+## Development
+
+```bash
+composer test                       # Pest: engines, validation, export, UI flows
+php vendor/bin/pest --parallel      # faster
+```
+
+Tests run on in-memory SQLite and seed the real package library.
+- `tests/Unit` covers each engine.
+- `tests/Feature` covers whole-project generation, the Manage page flow, the
+  export formats and report access.
+
+Package templates are seeded data (`database/seeders`). To add or change a
+package, edit its seeder and re-run `php artisan db:seed --class=PackageLibrarySeeder`.
+The seeder rebuilds the library inside a transaction.
