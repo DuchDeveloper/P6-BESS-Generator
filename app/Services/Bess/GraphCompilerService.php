@@ -57,6 +57,7 @@ class GraphCompilerService
                 ->where('selected', true)
                 ->where('applicable', true)
                 ->with(['template.activityTemplates', 'template.outputDefinitions', 'template.dependencyRules'])
+                ->orderBy('id')
                 ->get();
 
             // Stage 1: Instantiate activities from templates
@@ -678,28 +679,23 @@ class GraphCompilerService
     }
 
     /**
-     * Stage 9: Start-on-or-after constraints. The first activity (NTP) starts
-     * on or after the project start date, and so does any external receipt
-     * milestone that nothing in the schedule drives — the planner replaces
-     * that date with the contractual receipt date.
+     * Stage 9: Start-on-or-after constraints at the project start date for
+     * the activities nothing drives that are meant to start the schedule:
+     *  - root packages, whose template depends on nothing (NTP);
+     *  - external receipt milestones — the planner replaces the date with
+     *    the contractual receipt date.
+     * Any other activity without a predecessor is a logic gap and is left
+     * for OpenStartRule to report.
      */
     private function setProjectStartConstraint(Project $project): void
     {
-        $firstActivity = ActivityInstance::where('project_id', $project->id)
-            ->orderBy('id')
-            ->first();
-
-        if ($firstActivity) {
-            $firstActivity->update([
-                'constraint_type' => ConstraintType::StartOnOrAfter,
-                'constraint_date' => $project->start_date,
-            ]);
-        }
-
         ActivityInstance::where('project_id', $project->id)
-            ->where('is_milestone', true)
-            ->whereHas('packageInstance', fn ($q) => $q->where('ownership_mode', OwnershipMode::External))
             ->whereDoesntHave('predecessorRelationships')
+            ->where(fn ($q) => $q
+                ->whereHas('packageInstance.template', fn ($t) => $t->whereDoesntHave('dependencyRules'))
+                ->orWhere(fn ($external) => $external
+                    ->where('is_milestone', true)
+                    ->whereHas('packageInstance', fn ($p) => $p->where('ownership_mode', OwnershipMode::External))))
             ->update([
                 'constraint_type' => ConstraintType::StartOnOrAfter,
                 'constraint_date' => $project->start_date,
