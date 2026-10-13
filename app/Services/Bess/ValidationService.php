@@ -81,13 +81,36 @@ class ValidationService
 
     /**
      * Check if the project has any critical validation errors (blocks export).
+     * Critical errors can't be acknowledged away — only fixed (CLAUDE.md §15).
      */
     public function hasCriticalErrors(Project $project): bool
     {
+        return $this->criticalCount($project) > 0;
+    }
+
+    public function criticalCount(Project $project): int
+    {
         return ValidationError::where('project_id', $project->id)
             ->where('severity', ValidationSeverity::Critical)
+            ->count();
+    }
+
+    /**
+     * Mark every outstanding warning and info result as reviewed. Critical
+     * errors are left alone: they block export until the schedule is fixed.
+     *
+     * @return int  The number of results acknowledged
+     */
+    public function acknowledgeWarnings(Project $project, string $note = 'Reviewed by user'): int
+    {
+        return ValidationError::where('project_id', $project->id)
+            ->where('severity', '!=', ValidationSeverity::Critical)
             ->where('resolved', false)
-            ->exists();
+            ->update([
+                'resolved' => true,
+                'resolved_at' => now(),
+                'resolution_note' => $note,
+            ]);
     }
 
     /**
@@ -102,11 +125,13 @@ class ValidationService
             ->pluck('total', 'severity')
             ->all();
 
+        $critical = $this->criticalCount($project);
+
         return [
-            'critical' => $counts[ValidationSeverity::Critical->value] ?? 0,
-            'warning' => $counts[ValidationSeverity::Warning->value] ?? 0,
-            'info' => $counts[ValidationSeverity::Info->value] ?? 0,
-            'can_export' => !isset($counts[ValidationSeverity::Critical->value]) || $counts[ValidationSeverity::Critical->value] === 0,
+            'critical' => $critical,
+            'warning' => (int) ($counts[ValidationSeverity::Warning->value] ?? 0),
+            'info' => (int) ($counts[ValidationSeverity::Info->value] ?? 0),
+            'can_export' => $critical === 0,
         ];
     }
 }

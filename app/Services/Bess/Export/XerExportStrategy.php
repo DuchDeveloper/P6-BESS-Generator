@@ -5,10 +5,12 @@ declare(strict_types=1);
 namespace App\Services\Bess\Export;
 
 use App\Enums\ConstraintType;
+use App\Enums\P6TaskType;
 use App\Models\ActivityInstance;
 use App\Models\Project;
 use App\Models\Relationship;
 use App\Models\WbsNode;
+use App\Services\Bess\ExportService;
 use Carbon\Carbon;
 
 /**
@@ -28,7 +30,7 @@ class XerExportStrategy implements ExportStrategy
     {
         $this->projectId = $project->id + 4500; // Avoid low IDs that P6 may reserve
 
-        $filePath = $outputPath . '/' . $project->code . '.xer';
+        $filePath = $outputPath . '/' . ExportService::fileStem($project) . '.xer';
 
         $lines = [];
 
@@ -100,7 +102,7 @@ class XerExportStrategy implements ExportStrategy
 
     private function sanitize(string $value, int $max = 120): string
     {
-        return substr(preg_replace('/[\t\r\n]/', ' ', $value), 0, $max);
+        return mb_substr(preg_replace('/[\t\r\n]/', ' ', $value), 0, $max);
     }
 
     private function addCalendarTable(array &$lines, Project $project): void
@@ -243,7 +245,7 @@ class XerExportStrategy implements ExportStrategy
             ->get();
 
         $now = $this->dt(Carbon::now()->format('Y-m-d'));
-        $hoursPerDay = $project->calendar?->workdays_per_week ? 8 : 8;
+        $hoursPerDay = 8; // matches the 08:00–16:00 working day in the CALENDAR table
 
         $lines[] = $this->line('%T', 'TASK');
         $lines[] = $this->line('%F',
@@ -276,7 +278,7 @@ class XerExportStrategy implements ExportStrategy
 
         foreach ($activities as $activity) {
             $durationHours = $activity->duration_days * $hoursPerDay;
-            $taskType = $activity->is_milestone ? 'TT_Mile' : 'TT_Task';
+            $taskType = $this->taskType($activity);
             $wbsId = $activity->wbs_node_id + 28000;
             // Offset task IDs
             $taskId = $activity->id + 50000;
@@ -349,18 +351,34 @@ class XerExportStrategy implements ExportStrategy
         }
     }
 
-    private function mapConstraintType(?ConstraintType $type): string
+    /**
+     * P6 task type: milestones keep their start/finish flavour (approvals and
+     * completions are finish milestones), everything else is task dependent
+     * or level of effort.
+     */
+    private function taskType(ActivityInstance $activity): string
     {
-        if ($type === null || $type === ConstraintType::None) {
-            return '';
+        $type = $activity->p6_task_type;
+
+        if ($activity->is_milestone) {
+            return $type === P6TaskType::Milestone ? P6TaskType::Milestone->value : P6TaskType::FinishMilestone->value;
         }
 
+        return $type === P6TaskType::LevelOfEffort ? P6TaskType::LevelOfEffort->value : P6TaskType::Task->value;
+    }
+
+    /**
+     * P6 cstr_type codes. CS_ALAP is "as late as possible" — not a
+     * date constraint — so it must never stand in for Start On or After.
+     */
+    private function mapConstraintType(?ConstraintType $type): string
+    {
         return match ($type) {
-            ConstraintType::StartOnOrAfter => 'CS_ALAP',
-            ConstraintType::FinishOnOrBefore => 'CS_FNLTON',
-            ConstraintType::MandatoryStart => 'CS_MSO',
-            ConstraintType::MandatoryFinish => 'CS_MFO',
-            default => '',
+            ConstraintType::StartOnOrAfter => 'CS_MSOA',
+            ConstraintType::FinishOnOrBefore => 'CS_MEOB',
+            ConstraintType::MandatoryStart => 'CS_MANDSTART',
+            ConstraintType::MandatoryFinish => 'CS_MANDFIN',
+            ConstraintType::None, null => '',
         };
     }
 }

@@ -8,6 +8,7 @@ use App\Enums\ProjectStatus;
 use App\Models\Project;
 use App\Services\Bess\Export\ExcelExportStrategy;
 use App\Services\Bess\Export\ExportStrategy;
+use App\Services\Bess\Export\JsonExportStrategy;
 use App\Services\Bess\Export\XerExportStrategy;
 use RuntimeException;
 
@@ -18,19 +19,31 @@ class ExportService
     ) {}
 
     /**
-     * Export a project schedule. Validates first — blocks on critical errors.
+     * Export a project schedule. Validates the schedule as it stands first and
+     * blocks on critical errors (CLAUDE.md §1, §15).
      *
-     * @throws RuntimeException if critical validation errors exist
+     * @throws RuntimeException if the schedule isn't compiled or has critical validation errors
      */
     public function export(Project $project, string $format = 'xer', ?string $outputPath = null): string
     {
+        $strategy = $this->resolveStrategy($format);
+
+        if (! $project->activityInstances()->exists()) {
+            throw new RuntimeException('Cannot export: compile the schedule first.');
+        }
+
+        // Never trust an earlier validation run — it may predate the latest
+        // compile or ownership change.
+        $this->validationService->validate($project);
+
         if ($this->validationService->hasCriticalErrors($project)) {
+            $count = $this->validationService->criticalCount($project);
+
             throw new RuntimeException(
-                'Cannot export: project has unresolved critical validation errors.'
+                "Cannot export: the schedule has {$count} critical validation error(s). Fix them and recompile."
             );
         }
 
-        $strategy = $this->resolveStrategy($format);
         $outputPath ??= storage_path('app/exports');
 
         if (!is_dir($outputPath)) {
@@ -48,6 +61,16 @@ class ExportService
     }
 
     /**
+     * A safe export filename stem from the project code ("BESS/001" → "BESS-001").
+     */
+    public static function fileStem(Project $project): string
+    {
+        $stem = trim((string) preg_replace('/[^A-Za-z0-9._-]+/', '-', (string) $project->code), '-.');
+
+        return $stem !== '' ? $stem : 'project-' . $project->id;
+    }
+
+    /**
      * Get the strategy for a format string.
      */
     public function resolveStrategy(string $format): ExportStrategy
@@ -55,6 +78,7 @@ class ExportService
         return match ($format) {
             'xer' => new XerExportStrategy(),
             'excel', 'csv' => new ExcelExportStrategy(),
+            'json' => new JsonExportStrategy(),
             default => throw new RuntimeException("Unsupported export format: {$format}"),
         };
     }
@@ -67,6 +91,7 @@ class ExportService
         return [
             ['value' => 'xer', 'label' => 'Primavera P6 XER', 'extension' => 'xer'],
             ['value' => 'csv', 'label' => 'Excel / CSV', 'extension' => 'csv'],
+            ['value' => 'json', 'label' => 'JSON', 'extension' => 'json'],
         ];
     }
 }

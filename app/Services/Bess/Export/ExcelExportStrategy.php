@@ -7,6 +7,7 @@ namespace App\Services\Bess\Export;
 use App\Models\ActivityInstance;
 use App\Models\Project;
 use App\Models\Relationship;
+use App\Services\Bess\ExportService;
 
 /**
  * Export to a CSV/Excel-compatible format.
@@ -16,12 +17,12 @@ class ExcelExportStrategy implements ExportStrategy
 {
     public function export(Project $project, string $outputPath): string
     {
-        $filePath = $outputPath . '/' . $project->code . '.' . $this->extension();
+        $filePath = $outputPath . '/' . ExportService::fileStem($project) . '.' . $this->extension();
 
         $handle = fopen($filePath, 'w');
 
         // Header row
-        fputcsv($handle, array: [
+        fputcsv($handle, [
             'Activity Code',
             'Activity Name',
             'Duration (days)',
@@ -33,7 +34,7 @@ class ExcelExportStrategy implements ExportStrategy
             'Constraint Type',
             'Constraint Date',
             'Task Type',
-        ]);
+        ], escape: '');
 
         $activities = ActivityInstance::where('project_id', $project->id)
             ->with(['wbsNode', 'packageInstance.template'])
@@ -41,12 +42,13 @@ class ExcelExportStrategy implements ExportStrategy
             ->get();
 
         // Build predecessor lookup
+        $activitiesById = $activities->keyBy('id');
         $predecessorMap = Relationship::where('project_id', $project->id)
             ->get()
             ->groupBy('successor_id')
-            ->map(function ($rels) use ($activities) {
-                return $rels->map(function ($rel) use ($activities) {
-                    $pred = $activities->firstWhere('id', $rel->predecessor_id);
+            ->map(function ($rels) use ($activitiesById) {
+                return $rels->map(function ($rel) use ($activitiesById) {
+                    $pred = $activitiesById->get($rel->predecessor_id);
                     $code = $pred?->activity_code ?? '?';
                     $type = $rel->relationship_type->value;
                     $lag = $rel->lag_days !== 0 ? ($rel->lag_days > 0 ? "+{$rel->lag_days}d" : "{$rel->lag_days}d") : '';
@@ -56,7 +58,7 @@ class ExcelExportStrategy implements ExportStrategy
             });
 
         foreach ($activities as $activity) {
-            fputcsv($handle, array: [
+            fputcsv($handle, [
                 $activity->activity_code,
                 $activity->name,
                 $activity->duration_days,
@@ -68,7 +70,7 @@ class ExcelExportStrategy implements ExportStrategy
                 $activity->constraint_type?->value ?? '',
                 $activity->constraint_date?->format('Y-m-d') ?? '',
                 $activity->p6_task_type->value,
-            ]);
+            ], escape: '');
         }
 
         fclose($handle);
