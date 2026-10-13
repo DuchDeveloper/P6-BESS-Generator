@@ -71,7 +71,7 @@
         <x-filament::section>
             <div class="text-center">
                 @php
-                    $criticalCount = $this->record->validationErrors()->where('severity', 'critical')->where('resolved', false)->count();
+                    $criticalCount = $this->record->validationErrors()->where('severity', 'critical')->count();
                     $warningCount = $this->record->validationErrors()->where('severity', 'warning')->where('resolved', false)->count();
                 @endphp
                 <div class="text-2xl font-bold {{ $criticalCount > 0 ? 'text-danger-600 dark:text-danger-400' : 'text-success-600 dark:text-success-400' }}">
@@ -133,13 +133,26 @@
         </x-filament::section>
     @endif
 
-    {{-- Validation Errors --}}
-    @if($this->record->validationErrors()->where('resolved', false)->count() > 0)
-        <x-filament::section heading="Validation Issues" icon="heroicon-o-exclamation-triangle" collapsible collapsed>
+    {{-- Validation Errors (critical errors can't be acknowledged, so always show) --}}
+    @php
+        $openIssues = $this->record->validationErrors()
+            ->where(fn ($q) => $q->where('resolved', false)->orWhere('severity', 'critical'));
+        $openIssueCount = (clone $openIssues)->count();
+    @endphp
+    @if($openIssueCount > 0)
+        <x-filament::section heading="Validation Issues" icon="heroicon-o-exclamation-triangle" collapsible collapsed
+            :description="$openIssueCount > 30 ? 'Showing 30 of ' . $openIssueCount : null">
             <div class="space-y-2 max-h-96 overflow-y-auto">
-                @foreach($this->record->validationErrors()->where('resolved', false)->orderBy('severity')->limit(30)->get() as $error)
-                    <div class="flex items-start gap-2 rounded-lg border p-3 {{ $error->severity->value === 'critical' ? 'border-danger-300 bg-danger-50 dark:border-danger-700 dark:bg-danger-950' : 'border-warning-300 bg-warning-50 dark:border-warning-700 dark:bg-warning-950' }}">
-                        <x-filament::badge :color="$error->severity->value === 'critical' ? 'danger' : 'warning'" size="sm">
+                @foreach($openIssues->orderByRaw("case severity when 'critical' then 0 when 'warning' then 1 else 2 end")->limit(30)->get() as $error)
+                    @php
+                        $tone = match ($error->severity->value) {
+                            'critical' => ['danger', 'border-danger-300 bg-danger-50 dark:border-danger-700 dark:bg-danger-950'],
+                            'warning' => ['warning', 'border-warning-300 bg-warning-50 dark:border-warning-700 dark:bg-warning-950'],
+                            default => ['info', 'border-info-300 bg-info-50 dark:border-info-700 dark:bg-info-950'],
+                        };
+                    @endphp
+                    <div class="flex items-start gap-2 rounded-lg border p-3 {{ $tone[1] }}">
+                        <x-filament::badge :color="$tone[0]" size="sm">
                             {{ strtoupper($error->severity->value) }}
                         </x-filament::badge>
                         <div class="min-w-0 flex-1">

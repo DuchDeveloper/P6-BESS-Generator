@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Filament\Resources\ProjectResource\Pages;
 
 use App\Enums\OwnershipMode;
+use App\Enums\ValidationSeverity;
 use App\Filament\Resources\ProjectResource;
 use App\Models\PackageInstance;
 use App\Services\Bess\BasisOfScheduleService;
@@ -13,6 +14,7 @@ use App\Services\Bess\DependencyResolverService;
 use App\Services\Bess\ExportService;
 use App\Services\Bess\GraphCompilerService;
 use App\Services\Bess\PackageLibraryService;
+use App\Services\Bess\ScheduleBuilder;
 use App\Services\Bess\TopologyService;
 use App\Services\Bess\ValidationService;
 use Filament\Actions;
@@ -138,66 +140,82 @@ class ManageProject extends Page implements HasTable
                 ->action(fn () => $this->instantiatePackages())
                 ->visible(fn () => $this->record->packageInstances()->count() === 0),
 
-            Actions\Action::make('applyDeliveryModel')
-                ->label('2. Apply Delivery Model')
-                ->icon('heroicon-o-truck')
-                ->color('info')
-                ->requiresConfirmation()
-                ->action(fn () => $this->applyDeliveryModel())
-                ->visible(fn () => $this->record->packageInstances()->count() > 0),
-
-            Actions\Action::make('resolve')
-                ->label('3. Resolve Dependencies')
-                ->icon('heroicon-o-link')
-                ->color('warning')
-                ->requiresConfirmation()
-                ->action(fn () => $this->resolveDependencies())
-                ->visible(fn () => $this->record->packageInstances()->count() > 0),
-
-            Actions\Action::make('compile')
-                ->label('4. Compile Schedule')
+            Actions\Action::make('buildSchedule')
+                ->label('Build Schedule')
                 ->icon('heroicon-o-play')
-                ->color('warning')
+                ->color('primary')
                 ->requiresConfirmation()
-                ->modalDescription('This will generate all activities, relationships, and equipment. Previous compilation will be cleared.')
-                ->action(fn () => $this->compileGraph())
-                ->visible(fn () => $this->record->providerResolutions()->count() > 0),
+                ->modalDescription('Resolves dependencies, compiles the schedule and validates it, using the packages as they are set below. The previous compilation is replaced.')
+                ->action(fn () => $this->buildSchedule())
+                ->visible(fn () => $this->record->packageInstances()->exists()),
 
-            Actions\Action::make('validate')
-                ->label('5. Validate')
-                ->icon('heroicon-o-check-badge')
-                ->color('success')
-                ->action(fn () => $this->runValidation())
-                ->visible(fn () => $this->record->activityInstances()->count() > 0),
+            Actions\ActionGroup::make([
+                Actions\Action::make('applyDeliveryModel')
+                    ->label('2. Apply Delivery Model')
+                    ->icon('heroicon-o-truck')
+                    ->requiresConfirmation()
+                    ->modalDescription('Applies the delivery model\'s ownership rules to the packages. Ownership you changed by hand on the affected packages is overwritten.')
+                    ->action(fn () => $this->applyDeliveryModel()),
 
-            Actions\Action::make('resolveAll')
-                ->label('Resolve All Errors')
+                Actions\Action::make('resolve')
+                    ->label('3. Resolve Dependencies')
+                    ->icon('heroicon-o-link')
+                    ->requiresConfirmation()
+                    ->action(fn () => $this->resolveDependencies()),
+
+                Actions\Action::make('compile')
+                    ->label('4. Compile Schedule')
+                    ->icon('heroicon-o-cog-6-tooth')
+                    ->requiresConfirmation()
+                    ->modalDescription('This will generate all activities, relationships, and equipment. Previous compilation will be cleared.')
+                    ->action(fn () => $this->compileGraph())
+                    ->visible(fn () => $this->record->providerResolutions()->exists()),
+
+                Actions\Action::make('validate')
+                    ->label('5. Validate')
+                    ->icon('heroicon-o-check-badge')
+                    ->action(fn () => $this->runValidation())
+                    ->visible(fn () => $this->record->activityInstances()->exists()),
+            ])
+                ->label('Steps')
+                ->icon('heroicon-o-list-bullet')
+                ->color('gray')
+                ->button()
+                ->visible(fn () => $this->record->packageInstances()->exists()),
+
+            Actions\Action::make('acknowledgeWarnings')
+                ->label('Acknowledge Warnings')
                 ->icon('heroicon-o-check')
                 ->color('gray')
                 ->requiresConfirmation()
-                ->modalDescription('This will mark all validation errors as resolved, allowing export. Use this only if you have reviewed the errors.')
-                ->action(fn () => $this->resolveAllErrors())
-                ->visible(fn () => $this->record->validationErrors()->where('resolved', false)->exists()),
+                ->modalDescription('Marks the outstanding warnings and notes as reviewed. Critical errors are not affected — they block export until the schedule is fixed and recompiled.')
+                ->action(fn () => $this->acknowledgeWarnings())
+                ->visible(fn () => $this->record->validationErrors()
+                    ->where('severity', '!=', ValidationSeverity::Critical)
+                    ->where('resolved', false)
+                    ->exists()),
 
-            Actions\Action::make('exportXer')
-                ->label('Export XER')
+            Actions\ActionGroup::make([
+                Actions\Action::make('exportXer')
+                    ->label('Primavera P6 (XER)')
+                    ->icon('heroicon-o-arrow-down-tray')
+                    ->action(fn () => $this->exportAndDownload('xer')),
+
+                Actions\Action::make('exportCsv')
+                    ->label('Excel / CSV')
+                    ->icon('heroicon-o-table-cells')
+                    ->action(fn () => $this->exportAndDownload('csv')),
+
+                Actions\Action::make('exportJson')
+                    ->label('JSON')
+                    ->icon('heroicon-o-code-bracket')
+                    ->action(fn () => $this->exportAndDownload('json')),
+            ])
+                ->label('Export')
                 ->icon('heroicon-o-arrow-down-tray')
                 ->color('primary')
-                ->requiresConfirmation()
-                ->action(function () {
-                    return $this->exportAndDownload('xer');
-                })
-                ->visible(fn () => $this->record->activityInstances()->count() > 0),
-
-            Actions\Action::make('exportCsv')
-                ->label('Export CSV')
-                ->icon('heroicon-o-table-cells')
-                ->color('primary')
-                ->requiresConfirmation()
-                ->action(function () {
-                    return $this->exportAndDownload('csv');
-                })
-                ->visible(fn () => $this->record->activityInstances()->count() > 0),
+                ->button()
+                ->visible(fn () => $this->record->activityInstances()->exists()),
 
             Actions\ActionGroup::make([
                 Actions\Action::make('generateBos')
@@ -326,18 +344,28 @@ class ManageProject extends Page implements HasTable
             ->send();
     }
 
-    private function resolveAllErrors(): void
+    private function buildSchedule(): void
     {
-        $count = $this->record->validationErrors()->where('resolved', false)->count();
-        $this->record->validationErrors()->where('resolved', false)->update([
-            'resolved' => true,
-            'resolved_at' => now(),
-            'resolution_note' => 'Bulk resolved by user',
-        ]);
+        $result = app(ScheduleBuilder::class)->build($this->record);
+        $this->record->refresh();
 
         Notification::make()
-            ->title('Errors Resolved')
-            ->body("{$count} validation errors marked as resolved.")
+            ->title($result['can_export'] ? 'Schedule Built' : 'Schedule Built with Critical Errors')
+            ->body(
+                "Activities: {$result['activities']}, Relationships: {$result['relationships']}. "
+                . "Critical: {$result['critical']}, Warnings: {$result['warning']}, Notes: {$result['info']}"
+            )
+            ->color($result['can_export'] ? 'success' : 'danger')
+            ->send();
+    }
+
+    private function acknowledgeWarnings(): void
+    {
+        $count = app(ValidationService::class)->acknowledgeWarnings($this->record);
+
+        Notification::make()
+            ->title('Warnings Acknowledged')
+            ->body("{$count} warnings and notes marked as reviewed.")
             ->success()
             ->send();
     }
@@ -371,7 +399,7 @@ class ManageProject extends Page implements HasTable
 
         Notification::make()
             ->title($title)
-            ->body("Critical: {$summary['critical']}, Warnings: {$summary['warning']}")
+            ->body("Critical: {$summary['critical']}, Warnings: {$summary['warning']}, Notes: {$summary['info']}")
             ->color($summary['can_export'] ? 'success' : 'danger')
             ->send();
     }

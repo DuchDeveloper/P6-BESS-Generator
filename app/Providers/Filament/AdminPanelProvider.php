@@ -29,6 +29,7 @@ class AdminPanelProvider extends PanelProvider
             ->path('admin')
             ->viteTheme('resources/css/filament/admin/theme.css')
             ->login()
+            ->brandName('BESS Schedule Generator')
             ->colors([
                 'primary' => Color::Amber,
             ])
