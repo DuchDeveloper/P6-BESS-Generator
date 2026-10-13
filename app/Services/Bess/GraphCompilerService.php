@@ -16,6 +16,7 @@ use App\Enums\RelationshipType;
 use App\Enums\ResolutionType;
 use App\Enums\WbsCategory;
 use App\Models\ActivityInstance;
+use App\Models\DependencyRule;
 use App\Models\EquipmentNode;
 use App\Models\InterfaceRecord;
 use App\Models\PackageInstance;
@@ -689,17 +690,31 @@ class GraphCompilerService
      */
     private function setProjectStartConstraint(Project $project): void
     {
-        ActivityInstance::where('project_id', $project->id)
-            ->whereDoesntHave('predecessorRelationships')
+        $packages = PackageInstance::where('project_id', $project->id)->get(['id', 'template_id', 'ownership_mode']);
+        $templatesWithRules = DependencyRule::whereIn('consumer_template_id', $packages->pluck('template_id')->unique())
+            ->distinct()
+            ->pluck('consumer_template_id')
+            ->flip();
+
+        $rootPackageIds = $packages->reject(fn (PackageInstance $p) => $templatesWithRules->has($p->template_id))->pluck('id');
+        $externalPackageIds = $packages->where('ownership_mode', OwnershipMode::External)->pluck('id');
+        $driven = Relationship::where('project_id', $project->id)->pluck('successor_id')->flip();
+
+        $ids = ActivityInstance::where('project_id', $project->id)
             ->where(fn ($q) => $q
-                ->whereHas('packageInstance.template', fn ($t) => $t->whereDoesntHave('dependencyRules'))
+                ->whereIn('package_instance_id', $rootPackageIds)
                 ->orWhere(fn ($external) => $external
                     ->where('is_milestone', true)
-                    ->whereHas('packageInstance', fn ($p) => $p->where('ownership_mode', OwnershipMode::External))))
-            ->update([
+                    ->whereIn('package_instance_id', $externalPackageIds)))
+            ->pluck('id')
+            ->reject(fn (int $id) => $driven->has($id));
+
+        foreach ($ids->chunk(500) as $chunk) {
+            ActivityInstance::whereIn('id', $chunk)->update([
                 'constraint_type' => ConstraintType::StartOnOrAfter,
                 'constraint_date' => $project->start_date,
             ]);
+        }
     }
 
     // ── Architecture Config ─────────────────────────────────

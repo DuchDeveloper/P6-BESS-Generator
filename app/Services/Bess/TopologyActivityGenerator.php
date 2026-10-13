@@ -13,6 +13,8 @@ use App\Enums\WbsCategory;
 use App\Models\ActivityInstance;
 use App\Models\BlockConfiguration;
 use App\Models\EquipmentNode;
+use App\Models\PackageInstance;
+use App\Models\PackageTemplate;
 use App\Models\Project;
 use App\Models\Relationship;
 use App\Models\WbsNode;
@@ -535,10 +537,7 @@ class TopologyActivityGenerator
      */
     private function linkBessFdnDesignToWorkfront(Project $project, $blocks): void
     {
-        $bessFdnApproved = ActivityInstance::where('project_id', $project->id)
-            ->whereHas('packageInstance.template', fn ($q) => $q->where('code', 'civil_bess_fdn_ifc'))
-            ->where('is_milestone', true)
-            ->first();
+        $bessFdnApproved = $this->templateActivity($project, 'civil_bess_fdn_ifc', milestoneOnly: true);
 
         if ($bessFdnApproved === null) {
             return;
@@ -566,10 +565,7 @@ class TopologyActivityGenerator
      */
     private function linkFeederIfcToMvCableInstall(Project $project, $blocks, $nodes): void
     {
-        $feederIfc = ActivityInstance::where('project_id', $project->id)
-            ->whereHas('packageInstance.template', fn ($q) => $q->where('code', 'elec_p_feeder_ifc'))
-            ->where('is_milestone', true)
-            ->first();
+        $feederIfc = $this->templateActivity($project, 'elec_p_feeder_ifc', milestoneOnly: true);
 
         if ($feederIfc === null) {
             return;
@@ -694,10 +690,7 @@ class TopologyActivityGenerator
 
             // SUT MV Cable depends on switchroom building complete
             if ($generateSut) {
-                $srComplete = ActivityInstance::where('project_id', $project->id)
-                    ->whereHas('packageInstance.template', fn ($q) => $q->where('code', 'con_sr_civil'))
-                    ->where('is_milestone', true)
-                    ->first();
+                $srComplete = $this->templateActivity($project, 'con_sr_civil', milestoneOnly: true);
 
                 if ($srComplete) {
                     $sutNodes = $nodes->filter(fn ($n) =>
@@ -1265,14 +1258,9 @@ class TopologyActivityGenerator
             ]
         );
 
-        $itpIfc = ActivityInstance::where('project_id', $project->id)
-            ->whereHas('packageInstance.template', fn ($q) => $q->where('code', 'itp_ifc'))
-            ->where('is_milestone', true)
-            ->first();
+        $itpIfc = $this->templateActivity($project, 'itp_ifc', milestoneOnly: true);
 
-        $firstEnergise = ActivityInstance::where('project_id', $project->id)
-            ->whereHas('packageInstance.template', fn ($q) => $q->where('code', 'ms_first_bess_energise'))
-            ->first();
+        $firstEnergise = $this->templateActivity($project, 'ms_first_bess_energise');
 
         $activityDefs = [
             ['suffix' => 'DCIR', 'name' => 'DC IR, Polarity and Continuity Tests (strings and DC cables)', 'duration' => 2],
@@ -1411,13 +1399,9 @@ class TopologyActivityGenerator
             ]
         );
 
-        $firstEnergise = ActivityInstance::where('project_id', $project->id)
-            ->whereHas('packageInstance.template', fn ($q) => $q->where('code', 'ms_first_bess_energise'))
-            ->first();
+        $firstEnergise = $this->templateActivity($project, 'ms_first_bess_energise');
 
-        $onlineCommReady = ActivityInstance::where('project_id', $project->id)
-            ->whereHas('packageInstance.template', fn ($q) => $q->where('code', 'ms_bess_online_comm'))
-            ->first();
+        $onlineCommReady = $this->templateActivity($project, 'ms_bess_online_comm');
 
         $activityDefs = [
             ['suffix' => 'SOFT', 'name' => 'DC Bus Soft Charge / Pre-Charge Sequence',                          'duration' => 1],
@@ -1535,13 +1519,9 @@ class TopologyActivityGenerator
             return;
         }
 
-        $onlineCommReady = ActivityInstance::where('project_id', $project->id)
-            ->whereHas('packageInstance.template', fn ($q) => $q->where('code', 'ms_bess_online_comm'))
-            ->first();
+        $onlineCommReady = $this->templateActivity($project, 'ms_bess_online_comm');
 
-        $holdPoint1 = ActivityInstance::where('project_id', $project->id)
-            ->whereHas('packageInstance.template', fn ($q) => $q->where('code', 'ms_hold_point_1'))
-            ->first();
+        $holdPoint1 = $this->templateActivity($project, 'ms_hold_point_1');
 
         if ($onlineCommReady === null || $holdPoint1 === null) {
             return;
@@ -1683,6 +1663,28 @@ class TopologyActivityGenerator
             $mode->relationshipType(),
             $mode->requiresLag() ? max(0, $lagDays) : 0,
         );
+    }
+
+    /**
+     * The first activity (or milestone) of the package built from a template.
+     * Two indexed lookups rather than a nested whereHas, which some database
+     * planners turn into a scan per row on large schedules.
+     */
+    private function templateActivity(Project $project, string $templateCode, bool $milestoneOnly = false): ?ActivityInstance
+    {
+        $packageIds = PackageInstance::where('project_id', $project->id)
+            ->whereIn('template_id', PackageTemplate::where('code', $templateCode)->select('id'))
+            ->pluck('id');
+
+        if ($packageIds->isEmpty()) {
+            return null;
+        }
+
+        return ActivityInstance::where('project_id', $project->id)
+            ->whereIn('package_instance_id', $packageIds)
+            ->when($milestoneOnly, fn ($q) => $q->where('is_milestone', true))
+            ->orderBy('id')
+            ->first();
     }
 
     private function linkIfNotExists(Project $project, ActivityInstance $predecessor, ActivityInstance $successor): void
