@@ -10,6 +10,7 @@ enum RelationshipOrigin: string
     case Dependency = 'dependency';
     case Interface = 'interface';
     case Manual = 'manual';
+    case Rollup = 'rollup';
 
     public function label(): string
     {
@@ -18,6 +19,7 @@ enum RelationshipOrigin: string
             self::Dependency => 'Dependency (cross-package)',
             self::Interface => 'Interface (equipment)',
             self::Manual => 'Manual',
+            self::Rollup => 'Roll-up (phase closure)',
         };
     }
 }

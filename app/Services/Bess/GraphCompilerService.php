@@ -14,6 +14,7 @@ use App\Enums\ProjectStatus;
 use App\Enums\RelationshipOrigin;
 use App\Enums\RelationshipType;
 use App\Enums\ResolutionType;
+use App\Enums\WbsCategory;
 use App\Models\ActivityInstance;
 use App\Models\EquipmentNode;
 use App\Models\InterfaceRecord;
@@ -21,64 +22,80 @@ use App\Models\PackageInstance;
 use App\Models\Project;
 use App\Models\ProviderResolution;
 use App\Models\Relationship;
+use App\Models\WbsNode;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 
 class GraphCompilerService
 {
+    /** Activity code of the single terminal milestone every phase closure rolls up to. */
+    public const PROJECT_COMPLETE_CODE = 'PROJECT-COMPLETE';
+
     public function __construct(
         private readonly ProjectSetupService $setupService,
         private readonly TopologyService $topologyService,
         private readonly TopologyActivityGenerator $topologyActivityGenerator,
+        private readonly DependencyResolverService $dependencyResolver,
     ) {}
 
     /**
      * Compile the full schedule graph for a project.
-     * Pipeline: instantiate activities → build internal relationships → build cross-package
-     *           relationships → generate boundary milestones → generate topology equipment
-     *           → generate interface activities.
+     * Pipeline: instantiate activities → build internal relationships → generate boundary
+     *           milestones → build cross-package relationships → generate topology equipment
+     *           and activities → generate interface records → generate roll-up closures
+     *           → set start constraints.
+     *
+     * Runs in one transaction, so a failure leaves the previous compilation intact.
      */
     public function compile(Project $project): void
     {
-        // Clear previous compilation
-        $this->clearCompilation($project);
+        DB::transaction(function () use ($project): void {
+            // Clear previous compilation
+            $this->clearCompilation($project);
 
-        $activePackages = PackageInstance::where('project_id', $project->id)
-            ->where('selected', true)
-            ->where('applicable', true)
-            ->with(['template.activityTemplates', 'template.outputDefinitions'])
-            ->get();
+            $activePackages = PackageInstance::where('project_id', $project->id)
+                ->where('selected', true)
+                ->where('applicable', true)
+                ->with(['template.activityTemplates', 'template.outputDefinitions', 'template.dependencyRules'])
+                ->get();
 
-        // Stage 1: Instantiate activities from templates
-        $this->instantiateActivities($project, $activePackages);
+            // Stage 1: Instantiate activities from templates
+            $this->instantiateActivities($project, $activePackages);
 
-        // Stage 2: Build internal relationships (within packages)
-        $this->buildInternalRelationships($project, $activePackages);
+            // Stage 2: Build internal relationships (within packages)
+            $this->buildInternalRelationships($project, $activePackages);
 
-        // Stage 2b: Fan in DAG leaves into each package's completion milestone
-        $this->fanInPackageLeavesToCompletionMilestone($project, $activePackages);
+            // Stage 2b: Fan in DAG leaves into each package's completion milestone
+            $this->fanInPackageLeavesToCompletionMilestone($project, $activePackages);
 
-        // Stage 3: Build cross-package dependency relationships
-        $this->buildDependencyRelationships($project, $activePackages);
+            // Stage 3: Generate boundary milestones for external packages. Runs
+            // before Stage 4 so the receipt milestones exist to be linked.
+            $this->generateBoundaryMilestones($project, $activePackages);
 
-        // Stage 4: Generate boundary milestones for external packages
-        $this->generateBoundaryMilestones($project, $activePackages);
+            // Stage 4: Build cross-package dependency relationships
+            $this->buildDependencyRelationships($project, $activePackages);
 
-        // Stage 5: Generate equipment topology nodes
-        $this->generateEquipmentTopology($project);
+            // Stage 5: Generate equipment topology nodes
+            $this->generateEquipmentTopology($project);
 
-        // Stage 6: Generate topology activities (Battery, PCS, SUT per WBS.md)
-        $archConfig = $this->buildArchitectureConfig($project);
-        $this->topologyActivityGenerator->generate($project, $archConfig);
+            // Stage 6: Generate topology activities (Battery, PCS, SUT per WBS.md)
+            $archConfig = $this->buildArchitectureConfig($project);
+            $this->topologyActivityGenerator->generate($project, $archConfig);
 
-        // Stage 7: Generate interface records
-        $this->generateInterfaceActivities($project);
+            // Stage 7: Generate interface records
+            $this->generateInterfaceActivities($project);
 
-        // Stage 8: Set project start constraint
-        $this->setProjectStartConstraint($project);
+            // Stage 8: Roll dangling milestones up to phase closures
+            $this->generateRollupClosures($project);
 
-        $project->update([
-            'status' => ProjectStatus::Compiled,
-            'compiled_at' => now(),
-        ]);
+            // Stage 9: Set project start constraints
+            $this->setProjectStartConstraint($project);
+
+            $project->update([
+                'status' => ProjectStatus::Compiled,
+                'compiled_at' => now(),
+            ]);
+        });
     }
 
     /**
@@ -89,7 +106,7 @@ class GraphCompilerService
         $activityCodeCounter = 1;
 
         foreach ($activePackages as $instance) {
-            // External packages don't get activities — they get boundary milestones in Stage 4
+            // External packages don't get activities — they get boundary milestones in Stage 3
             if ($instance->ownership_mode === OwnershipMode::External) {
                 continue;
             }
@@ -184,20 +201,7 @@ class GraphCompilerService
                 continue;
             }
 
-            // Prefer the activity referenced by the output definition's
-            // `produced_by_sequence` (the package's true sign-off node). Some
-            // packages — notably procurement — have multiple milestones (e.g.
-            // PO Award and Delivered); fanning into the wrong one creates a
-            // cycle since the later milestone is already downstream of the
-            // earlier one.
-            $producedBySeq = $instance->template->outputDefinitions
-                ->pluck('produced_by_sequence')
-                ->filter()
-                ->first();
-
-            $anchor = $producedBySeq !== null
-                ? $activities->firstWhere('sequence', $producedBySeq)
-                : $activities->firstWhere('is_milestone', true);
+            $anchor = $this->completionAnchor($instance, $activities);
 
             if ($anchor === null) {
                 continue;
@@ -237,61 +241,75 @@ class GraphCompilerService
     }
 
     /**
-     * Stage 3: Build cross-package relationships from ProviderResolutions.
-     * Connects provider output activity → consumer gated activity.
+     * Stage 4: Build cross-package relationships from ProviderResolutions.
+     * Connects provider output activity → consumer gated activity, for both
+     * static dependency rules and the dynamic predecessors of design
+     * management packages (CLAUDE.md §7.9).
+     *
+     * External packages take part through their boundary receipt milestones:
+     * a provider feeds the receipt, and the receipt feeds downstream consumers.
      */
-    private function buildDependencyRelationships(Project $project, $activePackages): void
+    private function buildDependencyRelationships(Project $project, Collection $activePackages): void
     {
         $resolutions = ProviderResolution::where('project_id', $project->id)
             ->where('resolution_type', '!=', ResolutionType::Unresolved)
-            ->get();
+            ->get()
+            ->keyBy('output_key');
 
-        foreach ($resolutions as $resolution) {
-            // Find the provider activity (the milestone that produces this output)
-            $providerActivity = $this->findProviderActivity($resolution);
-            if ($providerActivity === null) {
+        $activities = ActivityInstance::where('project_id', $project->id)->get();
+        $activitiesById = $activities->keyBy('id');
+        $activitiesByPackage = $activities->groupBy('package_instance_id');
+        $packagesById = $activePackages->keyBy('id');
+        $dynamicDeps = $this->dependencyResolver->gatherDynamicPredecessors($activePackages);
+
+        $linked = Relationship::where('project_id', $project->id)
+            ->get(['predecessor_id', 'successor_id'])
+            ->mapWithKeys(fn (Relationship $r) => ["{$r->predecessor_id}:{$r->successor_id}" => true])
+            ->all();
+
+        foreach ($activePackages as $consumer) {
+            /** @var Collection<int, ActivityInstance> $consumerActivities */
+            $consumerActivities = $activitiesByPackage->get($consumer->id, collect());
+            if ($consumerActivities->isEmpty()) {
                 continue;
             }
 
-            // Find all consumer packages that require this output_key
-            $consumerInstances = $activePackages->filter(function (PackageInstance $inst) use ($resolution) {
-                return $inst->template->dependencyRules
-                    ->contains('required_output_key', $resolution->output_key);
-            });
+            // output_key → the consumer activity sequence it gates
+            $gates = [];
+            foreach ($consumer->template->dependencyRules as $rule) {
+                $gates[$rule->required_output_key] ??= $rule->gates_activity_sequence ?? 1;
+            }
+            foreach ($dynamicDeps[$consumer->id] ?? [] as $outputKey) {
+                $gates[$outputKey] ??= 1;
+            }
 
-            // Also find consumers with dynamic predecessors that include this output_key
-            $dynamicConsumers = $activePackages->filter(function (PackageInstance $inst) use ($resolution) {
-                if (!$inst->template->has_dynamic_predecessors) {
-                    return false;
-                }
-                // Dynamic predecessors are gathered at resolution time —
-                // check if there's a resolution pointing to this output
-                return true;
-            });
-
-            foreach ($consumerInstances as $consumer) {
-                if (!$consumer->ownership_mode->generatesActivities()) {
+            foreach ($gates as $outputKey => $gatedSequence) {
+                $resolution = $resolutions->get($outputKey);
+                if ($resolution === null) {
                     continue;
                 }
 
-                $rule = $consumer->template->dependencyRules
-                    ->firstWhere('required_output_key', $resolution->output_key);
-
-                $gatedSequence = $rule?->gates_activity_sequence ?? 1;
-                $consumerActivity = ActivityInstance::where('package_instance_id', $consumer->id)
-                    ->where('sequence', $gatedSequence)
-                    ->first();
-
-                if ($consumerActivity === null) {
+                $providerActivity = $this->findProviderActivity($resolution, $activitiesById, $activitiesByPackage, $packagesById);
+                if ($providerActivity === null) {
                     continue;
                 }
 
-                // Prevent duplicate relationships
-                $exists = Relationship::where('predecessor_id', $providerActivity->id)
-                    ->where('successor_id', $consumerActivity->id)
-                    ->exists();
+                $targets = $consumer->ownership_mode === OwnershipMode::External
+                    ? $consumerActivities
+                    : $consumerActivities->where('sequence', $gatedSequence)->take(1);
 
-                if (!$exists) {
+                foreach ($targets as $consumerActivity) {
+                    // Never link a package to itself (e.g. an output resolved
+                    // through the package that contains the consumer).
+                    if ($providerActivity->package_instance_id === $consumerActivity->package_instance_id) {
+                        continue;
+                    }
+
+                    $key = "{$providerActivity->id}:{$consumerActivity->id}";
+                    if (isset($linked[$key])) {
+                        continue;
+                    }
+
                     Relationship::create([
                         'project_id' => $project->id,
                         'predecessor_id' => $providerActivity->id,
@@ -300,14 +318,15 @@ class GraphCompilerService
                         'lag_days' => 0,
                         'origin' => RelationshipOrigin::Dependency,
                     ]);
+                    $linked[$key] = true;
                 }
             }
         }
     }
 
     /**
-     * Stage 4: Generate boundary milestones for External packages.
-     * External packages get a single receipt milestone instead of full activities.
+     * Stage 3: Generate boundary milestones for external packages.
+     * External packages get a receipt milestone per output instead of full activities.
      */
     private function generateBoundaryMilestones(Project $project, $activePackages): void
     {
@@ -316,14 +335,15 @@ class GraphCompilerService
         );
 
         foreach ($externalPackages as $instance) {
-            foreach ($instance->template->outputDefinitions as $output) {
+            foreach ($instance->template->outputDefinitions->values() as $index => $output) {
                 $codePrefix = $this->buildActivityCodePrefix($instance);
 
                 $milestone = ActivityInstance::create([
                     'project_id' => $project->id,
                     'package_instance_id' => $instance->id,
                     'wbs_node_id' => $instance->wbs_node_id,
-                    'activity_code' => sprintf('%s-BM', $codePrefix),
+                    // P6 needs unique activity IDs: number the second and later receipts.
+                    'activity_code' => $index === 0 ? sprintf('%s-BM', $codePrefix) : sprintf('%s-BM%d', $codePrefix, $index + 1),
                     'name' => $output->output_name . ' (External Receipt)',
                     'duration_days' => 0,
                     'is_milestone' => true,
@@ -358,7 +378,7 @@ class GraphCompilerService
     }
 
     /**
-     * Stage 6: Generate interface records between equipment nodes.
+     * Stage 7: Generate interface records between equipment nodes.
      * Battery Group N → PCS Group N (DC), PCS → SUT (LV AC), SUT → Switchroom (MV).
      */
     private function generateInterfaceActivities(Project $project): void
@@ -406,8 +426,23 @@ class GraphCompilerService
                     }
                 }
 
+                // No-SUT architectures: PCS feeds the switchroom directly at MV.
+                if ($suts->isEmpty()) {
+                    foreach ($switchroom !== null ? $pcsGroups : [] as $pcs) {
+                        InterfaceRecord::create([
+                            'project_id' => $project->id,
+                            'from_node_id' => $pcs->id,
+                            'to_node_id' => $switchroom->id,
+                            'interface_type' => InterfaceType::Power,
+                            'cable_type' => 'MV',
+                            'generates_activities' => false, // MV cable activities come from the topology generator
+                            'activity_types' => [],
+                        ]);
+                    }
+                }
+
                 // PCS Group N → SUT N (LV AC cables)
-                foreach ($pcsGroups as $pcs) {
+                foreach ($suts->isNotEmpty() ? $pcsGroups : [] as $pcs) {
                     $sut = $suts->firstWhere('group_number', $pcs->group_number);
                     if (!$sut) {
                         // Map PCS to SUT when counts differ (round-robin)
@@ -544,7 +579,109 @@ class GraphCompilerService
     }
 
     /**
-     * Stage 7: Set start-on-or-after constraint on the first activity.
+     * Stage 8: Roll-up closures (CLAUDE.md §1, §5.5). Every milestone that
+     * drives nothing downstream rolls up to a closure milestone for its phase
+     * (top-level WBS branch), and each phase closure rolls up to a single
+     * terminal Project Complete milestone. The end of the project is then the
+     * only open finish in the schedule.
+     *
+     * Only milestones roll up: a task left without a successor is a genuine
+     * logic gap and stays visible to OpenFinishRule.
+     */
+    private function generateRollupClosures(Project $project): void
+    {
+        $drivers = Relationship::where('project_id', $project->id)
+            ->pluck('predecessor_id')
+            ->flip();
+
+        $dangling = ActivityInstance::where('project_id', $project->id)
+            ->where('is_milestone', true)
+            ->orderBy('id')
+            ->get()
+            ->reject(fn (ActivityInstance $a) => $drivers->has($a->id));
+
+        if ($dangling->isEmpty()) {
+            return;
+        }
+
+        $nodes = WbsNode::where('project_id', $project->id)->get()->keyBy('id');
+        $branchOf = function (?int $nodeId) use ($nodes): ?WbsNode {
+            $node = $nodeId !== null ? $nodes->get($nodeId) : null;
+            while ($node !== null && $node->level > 1) {
+                $node = $nodes->get($node->parent_id);
+            }
+
+            return $node?->level === 1 ? $node : null;
+        };
+
+        $milestonesBranch = $nodes->first(
+            fn (WbsNode $n) => $n->level === 1 && $n->wbs_category === WbsCategory::Milestones
+        );
+
+        $projectComplete = ActivityInstance::create([
+            'project_id' => $project->id,
+            'package_instance_id' => null,
+            'wbs_node_id' => $milestonesBranch?->id ?? $dangling->first()->wbs_node_id,
+            'activity_code' => self::PROJECT_COMPLETE_CODE,
+            'name' => 'Project Complete',
+            'duration_days' => 0,
+            'is_milestone' => true,
+            'sequence' => 1,
+            'p6_task_type' => P6TaskType::FinishMilestone,
+        ]);
+
+        $byBranch = $dangling->groupBy(fn (ActivityInstance $a) => $branchOf($a->wbs_node_id)?->id ?? 0);
+
+        foreach ($byBranch as $branchId => $milestones) {
+            $branch = $nodes->get($branchId);
+
+            // Milestones that already sit in the Milestones branch (handover,
+            // award dates…) and anything outside the WBS go straight to the end.
+            if ($branch === null || $branch->wbs_category === WbsCategory::Milestones) {
+                foreach ($milestones as $milestone) {
+                    $this->rollup($project, $milestone, $projectComplete);
+                }
+
+                continue;
+            }
+
+            $closure = ActivityInstance::create([
+                'project_id' => $project->id,
+                'package_instance_id' => null,
+                'wbs_node_id' => $branch->id,
+                'activity_code' => 'PHASE-' . strtoupper($branch->wbs_category?->value ?? (string) $branch->id) . '-COMPLETE',
+                'name' => "{$branch->name} Complete",
+                'duration_days' => 0,
+                'is_milestone' => true,
+                'sequence' => 1,
+                'p6_task_type' => P6TaskType::FinishMilestone,
+            ]);
+
+            foreach ($milestones as $milestone) {
+                $this->rollup($project, $milestone, $closure);
+            }
+
+            $this->rollup($project, $closure, $projectComplete);
+        }
+    }
+
+    private function rollup(Project $project, ActivityInstance $from, ActivityInstance $to): void
+    {
+        Relationship::create([
+            'project_id' => $project->id,
+            'predecessor_id' => $from->id,
+            'successor_id' => $to->id,
+            'relationship_type' => RelationshipType::FinishToStart,
+            'lag_days' => 0,
+            'origin' => RelationshipOrigin::Rollup,
+        ]);
+    }
+
+    /**
+     * Stage 9: Start-on-or-after constraints. The first activity (NTP) starts
+     * on or after the project start date, and so does any external receipt
+     * milestone that nothing in the schedule drives — the planner replaces
+     * that date with the contractual receipt date.
      */
     private function setProjectStartConstraint(Project $project): void
     {
@@ -558,6 +695,15 @@ class GraphCompilerService
                 'constraint_date' => $project->start_date,
             ]);
         }
+
+        ActivityInstance::where('project_id', $project->id)
+            ->where('is_milestone', true)
+            ->whereHas('packageInstance', fn ($q) => $q->where('ownership_mode', OwnershipMode::External))
+            ->whereDoesntHave('predecessorRelationships')
+            ->update([
+                'constraint_type' => ConstraintType::StartOnOrAfter,
+                'constraint_date' => $project->start_date,
+            ]);
     }
 
     // ── Architecture Config ─────────────────────────────────
@@ -653,32 +799,58 @@ class GraphCompilerService
 
     // ── Helpers ──────────────────────────────────────────────
 
-    private function findProviderActivity(ProviderResolution $resolution): ?ActivityInstance
-    {
+    /**
+     * The activity that produces a resolved output: the external receipt
+     * milestone, or the provider package's activity at the output's
+     * produced_by_sequence. An output resolved through a containing package
+     * (included_elsewhere) isn't defined on that package's template, so the
+     * containing package's completion anchor stands in for it.
+     */
+    private function findProviderActivity(
+        ProviderResolution $resolution,
+        Collection $activitiesById,
+        Collection $activitiesByPackage,
+        Collection $packagesById,
+    ): ?ActivityInstance {
         if ($resolution->provider_activity_instance_id) {
-            return ActivityInstance::find($resolution->provider_activity_instance_id);
+            return $activitiesById->get($resolution->provider_activity_instance_id);
         }
 
-        if ($resolution->provider_package_instance_id === null) {
-            return null;
-        }
-
-        $instance = PackageInstance::with('template.outputDefinitions')->find($resolution->provider_package_instance_id);
+        $instance = $packagesById->get($resolution->provider_package_instance_id);
         if ($instance === null) {
             return null;
         }
 
-        // Find the output definition for this key to get the produced_by_sequence
+        $activities = $activitiesByPackage->get($instance->id, collect());
+
         $outputDef = $instance->template->outputDefinitions
             ->firstWhere('output_key', $resolution->output_key);
 
         if ($outputDef === null) {
-            return null;
+            return $this->completionAnchor($instance, $activities);
         }
 
-        return ActivityInstance::where('package_instance_id', $instance->id)
-            ->where('sequence', $outputDef->produced_by_sequence)
+        return $activities->firstWhere('sequence', $outputDef->produced_by_sequence);
+    }
+
+    /**
+     * A package's completion anchor: the activity referenced by its output
+     * definition's `produced_by_sequence` (the package's true sign-off node),
+     * else its first milestone. Some packages — notably procurement — have
+     * multiple milestones (e.g. PO Award and Delivered); anchoring on the
+     * wrong one creates a cycle since the later milestone is already
+     * downstream of the earlier one.
+     */
+    private function completionAnchor(PackageInstance $instance, Collection $activities): ?ActivityInstance
+    {
+        $producedBySeq = $instance->template->outputDefinitions
+            ->pluck('produced_by_sequence')
+            ->filter()
             ->first();
+
+        return $producedBySeq !== null
+            ? $activities->firstWhere('sequence', $producedBySeq)
+            : $activities->firstWhere('is_milestone', true);
     }
 
     private function buildActivityCodePrefix(PackageInstance $instance): string

@@ -8,6 +8,7 @@ use App\Enums\ValidationSeverity;
 use App\Models\ActivityInstance;
 use App\Models\Project;
 use App\Models\Relationship;
+use App\Services\Bess\GraphCompilerService;
 
 /**
  * Critical: Every activity must have at least one successor
@@ -17,7 +18,9 @@ class OpenFinishRule implements ValidationRule
 {
     public function validate(Project $project): array
     {
-        $allActivities = ActivityInstance::where('project_id', $project->id)->get();
+        $allActivities = ActivityInstance::where('project_id', $project->id)
+            ->with('packageInstance.template')
+            ->get();
         $predecessorIds = Relationship::where('project_id', $project->id)
             ->pluck('predecessor_id')
             ->unique();
@@ -53,6 +56,11 @@ class OpenFinishRule implements ValidationRule
     {
         if (!$activity->is_milestone) {
             return false;
+        }
+
+        // The compiler's roll-up stage ends the schedule on Project Complete.
+        if ($activity->activity_code === GraphCompilerService::PROJECT_COMPLETE_CODE && $activity->package_instance_id === null) {
+            return true;
         }
 
         $terminalCodes = ['ms_hold_point_1', 'ms_bess_online_comm'];

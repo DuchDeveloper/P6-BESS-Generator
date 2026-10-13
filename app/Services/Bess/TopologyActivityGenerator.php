@@ -544,14 +544,14 @@ class TopologyActivityGenerator
             return;
         }
 
-        $firstBlock = $blocks->first();
-        if ($firstBlock === null) {
-            return;
-        }
-
-        $workfront = $this->activityMap["workfront_{$firstBlock->zone_number}_{$firstBlock->block_number}"] ?? null;
-        if ($workfront) {
-            $this->linkIfNotExists($project, $bessFdnApproved, $workfront);
+        // Zones run in parallel and each zone's block chain starts fresh, so
+        // the first block of every zone waits on the foundation design.
+        foreach ($blocks->groupBy('zone_number') as $zoneBlocks) {
+            $firstBlock = $zoneBlocks->first();
+            $workfront = $this->activityMap["workfront_{$firstBlock->zone_number}_{$firstBlock->block_number}"] ?? null;
+            if ($workfront) {
+                $this->linkIfNotExists($project, $bessFdnApproved, $workfront);
+            }
         }
     }
 
@@ -915,8 +915,10 @@ class TopologyActivityGenerator
             );
             $this->link($project, $civilLast, $mechAct);
 
-            // MV cables from each SUT to block RMU
-            $lastMvIn = $mechAct;
+            // MV cables from each SUT to block RMU, each terminated before
+            // the outgoing cable is pulled (as in the per-SUT layout). Every
+            // feeder drives the outgoing cable, so none is left open-ended.
+            $mvInTerms = [];
             foreach ($sutNodes->sortBy('group_number') as $sn) {
                 $s = $sn->group_number;
                 $mvInAct = $this->createActivity($project, $mvSutToRmuWbs,
@@ -928,7 +930,13 @@ class TopologyActivityGenerator
                 if ($sutComplete) {
                     $this->linkIfNotExists($project, $sutComplete, $mvInAct);
                 }
-                $lastMvIn = $mvInAct;
+
+                $mvInTerm = $this->createActivity($project, $termSutToRmuWbs,
+                    "{$codePrefix}-MIT-S{$s}", "Terminate MV Cable at SUT {$s} and Block RMU -{$rmuTag}",
+                    self::RMU_DURATIONS['termination'],
+                );
+                $this->link($project, $mvInAct, $mvInTerm);
+                $mvInTerms[] = $mvInTerm;
             }
 
             // MV cable out
@@ -936,7 +944,9 @@ class TopologyActivityGenerator
                 "{$codePrefix}-MVO", "MV Cable Installation Block RMU to Switchroom -{$rmuTag}",
                 self::RMU_DURATIONS['mv_cable_out'],
             );
-            $this->link($project, $lastMvIn, $mvOutAct);
+            foreach ($mvInTerms !== [] ? $mvInTerms : [$mechAct] as $predecessor) {
+                $this->link($project, $predecessor, $mvOutAct);
+            }
 
             if ($ringSequencing && $prevBlockRmuTerm !== null) {
                 $this->link($project, $prevBlockRmuTerm, $mvOutAct);
@@ -1001,7 +1011,9 @@ class TopologyActivityGenerator
             $rmuTag = "Zone RMU Z{$z}";
             $codePrefix = "Z{$z}-ZRMU";
 
-            $civilLast = $this->generateRmuCivilActivities($project, $rmuWbs, $codePrefix, $rmuTag, null);
+            // The zone RMU pad can start once the zone's first workfront is released.
+            $zoneWorkfront = $this->activityMap["workfront_{$z}_{$zoneBlock->block_number}"] ?? null;
+            $civilLast = $this->generateRmuCivilActivities($project, $rmuWbs, $codePrefix, $rmuTag, $zoneWorkfront);
 
             $mechAct = $this->createActivity($project, $rmuWbs,
                 "{$codePrefix}-MEC", "Zone Collector RMU Installation -{$rmuTag}",
@@ -1098,7 +1110,8 @@ class TopologyActivityGenerator
             );
             $this->link($project, $civilLast, $mechAct);
 
-            $lastMvIn = $mechAct;
+            // Every incoming cable is terminated and drives the outgoing cable.
+            $mvInTerms = [];
             for ($s = 1; $s <= $block->sut_count; $s++) {
                 $rmuComplete = $this->activityMap["rmu_{$z}_{$b}_{$s}_complete"] ?? null;
                 $mvInAct = $this->createActivity($project, $mvSutToRmuWbs,
@@ -1109,14 +1122,22 @@ class TopologyActivityGenerator
                 if ($rmuComplete) {
                     $this->linkIfNotExists($project, $rmuComplete, $mvInAct);
                 }
-                $lastMvIn = $mvInAct;
+
+                $mvInTerm = $this->createActivity($project, $termSutToRmuWbs,
+                    "{$codePrefix}-MIT-R{$s}", "Terminate MV Cable at SUT RMU {$s} and Block RMU -{$rmuTag}",
+                    self::RMU_DURATIONS['termination'],
+                );
+                $this->link($project, $mvInAct, $mvInTerm);
+                $mvInTerms[] = $mvInTerm;
             }
 
             $mvOutAct = $this->createActivity($project, $mvRmuToSrWbs,
                 "{$codePrefix}-MVO", "MV Cable Installation Block RMU to Switchroom -{$rmuTag}",
                 self::RMU_DURATIONS['mv_cable_out'],
             );
-            $this->link($project, $lastMvIn, $mvOutAct);
+            foreach ($mvInTerms !== [] ? $mvInTerms : [$mechAct] as $predecessor) {
+                $this->link($project, $predecessor, $mvOutAct);
+            }
 
             if ($ringSequencing && $prevBlockRmuTerm !== null) {
                 $this->link($project, $prevBlockRmuTerm, $mvOutAct);

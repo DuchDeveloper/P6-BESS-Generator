@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace App\Services\Bess\Strategies;
 
 use App\Enums\OwnershipMode;
-use App\Enums\PackageType;
 use App\Models\Project;
 use Illuminate\Support\Collection;
 
@@ -18,10 +17,10 @@ class BopFreeIssuedStrategy implements DeliveryModelStrategy
     public function apply(Project $project, Collection $packageInstances): Collection
     {
         foreach ($packageInstances as $instance) {
-            $templateCode = $instance->template->code;
-
-            // Suppress BESS procurement — equipment is free-issued
-            if ($templateCode === 'proc_bess') {
+            // Suppress everything that only exists when the contractor buys
+            // the BESS (procurement and its PO award milestone) — the same
+            // packages the bess_free_issued flag switches off.
+            if ($instance->template->condition_flag === 'bess_free_issued') {
                 $instance->update([
                     'ownership_mode' => OwnershipMode::NotApplicable,
                     'selected' => false,

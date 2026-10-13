@@ -7,7 +7,6 @@ namespace App\Services\Bess;
 use App\Enums\OwnershipMode;
 use App\Enums\ResolutionType;
 use App\Models\DependencyRule;
-use App\Models\OutputDefinition;
 use App\Models\PackageInstance;
 use App\Models\Project;
 use App\Models\ProviderResolution;
@@ -37,24 +36,42 @@ class DependencyResolverService
         $dynamicDeps = $this->gatherDynamicPredecessors($activePackages);
 
         // Step 3: Create provider resolution records
-        $unresolved = $this->createResolutions($project, $activePackages, $providerMap, $dynamicDeps);
+        $unresolved = $this->createResolutions($project, $activePackages, $providerMap, $dynamicDeps, $this->notRequiredOutputs($activePackages));
 
         return $unresolved;
     }
 
     /**
      * Build a map of output_key → PackageInstance that provides it.
+     *
+     * Ownership mode decides who provides an output (CLAUDE.md §6):
+     *  - internal / external: the package itself;
+     *  - included_elsewhere: the containing package, which does the work;
+     *  - not_applicable: nobody — the output is not required, so it is left
+     *    out of the map and consumers drop the dependency.
      */
     private function buildProviderMap(Collection $activePackages): array
     {
         $map = [];
 
         foreach ($activePackages as $instance) {
+            $provider = match ($instance->ownership_mode) {
+                OwnershipMode::NotApplicable => null,
+                OwnershipMode::IncludedElsewhere => $activePackages->firstWhere('id', $instance->included_in_package_id),
+                default => $instance,
+            };
+
+            // A containing package that is itself included elsewhere or not
+            // applicable can't do the work either.
+            if ($provider === null || ! in_array($provider->ownership_mode, [OwnershipMode::Internal, OwnershipMode::External], true)) {
+                continue;
+            }
+
             foreach ($instance->template->outputDefinitions as $output) {
                 $map[$output->output_key] = [
-                    'package_instance' => $instance,
+                    'package_instance' => $provider,
                     'output_definition' => $output,
-                    'resolution_type' => $instance->ownership_mode === OwnershipMode::External
+                    'resolution_type' => $provider->ownership_mode === OwnershipMode::External
                         ? ResolutionType::External
                         : ResolutionType::Internal,
                 ];
@@ -65,10 +82,30 @@ class DependencyResolverService
     }
 
     /**
-     * Gather dynamic predecessors for design management packages.
-     * These packages depend on all selected discipline packages at a matching maturity level.
+     * Output keys whose package is marked not_applicable: nothing provides
+     * them and nothing needs to.
+     *
+     * @return array<string, true>
      */
-    private function gatherDynamicPredecessors(Collection $activePackages): array
+    private function notRequiredOutputs(Collection $activePackages): array
+    {
+        return $activePackages
+            ->filter(fn (PackageInstance $pkg) => $pkg->ownership_mode === OwnershipMode::NotApplicable)
+            ->flatMap(fn (PackageInstance $pkg) => $pkg->template->outputDefinitions->pluck('output_key'))
+            ->mapWithKeys(fn (string $key) => [$key => true])
+            ->all();
+    }
+
+    /**
+     * Dynamic predecessors for design management packages (CLAUDE.md §7.9):
+     * each review depends on every selected discipline package at its
+     * maturity level. Shared with the graph compiler, which links them.
+     *
+     * Expects packages loaded with template.outputDefinitions.
+     *
+     * @return array<int, list<string>> consumer package instance id → output keys
+     */
+    public function gatherDynamicPredecessors(Collection $activePackages): array
     {
         $dynamicDeps = [];
 
@@ -76,6 +113,10 @@ class DependencyResolverService
             $template = $instance->template;
 
             if (!$template->has_dynamic_predecessors || $template->dynamic_predecessor_maturity === null) {
+                continue;
+            }
+
+            if ($instance->ownership_mode === OwnershipMode::NotApplicable) {
                 continue;
             }
 
@@ -107,12 +148,18 @@ class DependencyResolverService
         Collection $activePackages,
         array $providerMap,
         array $dynamicDeps,
+        array $notRequired,
     ): array {
         $unresolved = [];
         $resolutions = [];
 
-        // Resolve static dependencies from dependency_rules
+        // Resolve static dependencies from dependency_rules. A package marked
+        // not_applicable is suppressed entirely, so its inputs aren't needed.
         foreach ($activePackages as $instance) {
+            if ($instance->ownership_mode === OwnershipMode::NotApplicable) {
+                continue;
+            }
+
             foreach ($instance->template->dependencyRules as $rule) {
                 $this->resolveOutputKey(
                     $project,
@@ -120,6 +167,7 @@ class DependencyResolverService
                     $providerMap,
                     $resolutions,
                     $unresolved,
+                    $notRequired,
                     $instance,
                     $rule,
                 );
@@ -136,6 +184,7 @@ class DependencyResolverService
                     $providerMap,
                     $resolutions,
                     $unresolved,
+                    $notRequired,
                     $instance,
                 );
             }
@@ -155,6 +204,7 @@ class DependencyResolverService
         array $providerMap,
         array &$resolutions,
         array &$unresolved,
+        array $notRequired,
         PackageInstance $consumer,
         ?DependencyRule $rule = null,
     ): void {
@@ -173,8 +223,12 @@ class DependencyResolverService
                 'resolution_type' => $provider['resolution_type'],
             ];
         } else {
-            // Check if the output is from a not_applicable or deselected package
-            $allOutputs = OutputDefinition::pluck('output_key', 'package_template_id');
+            // Provided by a package marked not_applicable — not required.
+            if (isset($notRequired[$outputKey])) {
+                return;
+            }
+
+            // Check if the output is from a deselected or not applicable package
             $isSuppressed = PackageInstance::where('project_id', $project->id)
                 ->whereHas('template.outputDefinitions', fn ($q) => $q->where('output_key', $outputKey))
                 ->where(fn ($q) => $q->where('selected', false)->orWhere('applicable', false))
