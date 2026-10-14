@@ -39,6 +39,7 @@ class CalendarResource extends Resource
     {
         return $schema->components([
             Section::make('Calendar')
+                ->columnSpanFull()
                 ->schema([
                     TextInput::make('name')
                         ->required()
@@ -49,13 +50,15 @@ class CalendarResource extends Resource
                         ->label('Working days')
                         ->options(Calendar::WEEKDAYS)
                         ->default([1, 2, 3, 4, 5])
-                        ->columns(4)
+                        ->columns(['default' => 2, 'sm' => 4, 'lg' => 7])
+                        ->gridDirection('row')
                         ->required()
                         ->helperText('Each working day is 08:00–16:00 in the exported calendar.'),
                     Toggle::make('is_default')
                         ->label('Default for new projects'),
                 ]),
             Section::make('Public holidays')
+                ->columnSpanFull()
                 ->description('Non-working days, exported to P6 as calendar exceptions.')
                 ->schema([
                     Repeater::make('holidays')
