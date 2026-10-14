@@ -11,6 +11,7 @@ use App\Models\PackageInstance;
 use App\Models\PackageTemplate;
 use App\Models\Project;
 use Illuminate\Support\Collection;
+use InvalidArgumentException;
 
 class PackageLibraryService
 {
@@ -55,14 +56,42 @@ class PackageLibraryService
     }
 
     /**
-     * Update ownership mode for a package instance. Cascades to included packages.
+     * Update ownership mode for a package instance. A package that's included
+     * elsewhere must name the active package that does its work.
+     *
+     * @throws InvalidArgumentException when an included-elsewhere package has no valid containing package
      */
     public function setOwnershipMode(PackageInstance $instance, OwnershipMode $mode, ?int $includedInPackageId = null): void
     {
+        if ($mode === OwnershipMode::IncludedElsewhere
+            && ($includedInPackageId === null || ! array_key_exists($includedInPackageId, $this->containerOptions($instance)))) {
+            throw new InvalidArgumentException('Choose the active package whose scope includes this one.');
+        }
+
         $instance->update([
             'ownership_mode' => $mode,
             'included_in_package_id' => $mode === OwnershipMode::IncludedElsewhere ? $includedInPackageId : null,
         ]);
+    }
+
+    /**
+     * Packages that can contain this one: active packages in the same project
+     * that do their own work (internal or external), keyed by id.
+     *
+     * @return array<int, string>
+     */
+    public function containerOptions(PackageInstance $instance): array
+    {
+        return PackageInstance::where('project_id', $instance->project_id)
+            ->whereKeyNot($instance->getKey())
+            ->where('selected', true)
+            ->where('applicable', true)
+            ->whereIn('ownership_mode', [OwnershipMode::Internal, OwnershipMode::External])
+            ->with('template')
+            ->get()
+            ->sortBy(fn (PackageInstance $p) => $p->template->name)
+            ->mapWithKeys(fn (PackageInstance $p) => [$p->id => "{$p->template->name} ({$p->template->code})"])
+            ->all();
     }
 
     /**

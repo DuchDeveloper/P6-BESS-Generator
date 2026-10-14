@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Filament\Resources\ProjectResource\Pages;
 
+use App\Enums\BuildStatus;
 use App\Enums\OwnershipMode;
 use App\Enums\ValidationSeverity;
 use App\Filament\Resources\ProjectResource;
@@ -14,15 +15,20 @@ use App\Services\Bess\DependencyResolverService;
 use App\Services\Bess\ExportService;
 use App\Services\Bess\GraphCompilerService;
 use App\Services\Bess\PackageLibraryService;
+use App\Services\Bess\ProjectBusyException;
+use App\Services\Bess\ProjectLock;
 use App\Services\Bess\ScheduleBuilder;
 use App\Services\Bess\TopologyService;
 use App\Services\Bess\ValidationService;
 use Filament\Actions;
+use Filament\Actions\BulkAction;
+use Filament\Forms\Components\Radio;
+use Filament\Forms\Components\Select;
 use Filament\Notifications\Notification;
+use Filament\Schemas\Components\Utilities\Get;
 use Filament\Resources\Pages\Concerns\InteractsWithRecord;
 use Filament\Resources\Pages\Page;
 use Filament\Tables\Columns\IconColumn;
-use Filament\Tables\Columns\SelectColumn;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Columns\ToggleColumn;
 use Filament\Tables\Concerns\InteractsWithTable;
@@ -31,6 +37,7 @@ use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Filters\TernaryFilter;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Collection;
 
 class ManageProject extends Page implements HasTable
 {
@@ -46,9 +53,27 @@ class ManageProject extends Page implements HasTable
         return "Manage: {$this->record->name}";
     }
 
+    /** A build was in progress when the page last looked; notify when it ends. */
+    public bool $watchingBuild = false;
+
     public function mount(int|string $record): void
     {
         $this->record = $this->resolveRecord($record);
+        $this->watchingBuild = $this->record->isBuilding();
+    }
+
+    /**
+     * Polled while a build runs (see the banner in the view).
+     */
+    public function checkBuild(): void
+    {
+        $this->record->refresh();
+
+        if ($this->watchingBuild && ! $this->record->isBuilding()) {
+            $this->watchingBuild = false;
+            $this->notifyBuildResult();
+            $this->resetTable();
+        }
     }
 
     // ── Package Instances Table ──────────────────────────────
@@ -59,7 +84,7 @@ class ManageProject extends Page implements HasTable
             ->query(
                 PackageInstance::query()
                     ->where('project_id', $this->record->id)
-                    ->with('template')
+                    ->with(['template', 'includedInPackage.template'])
             )
             ->columns([
                 TextColumn::make('template.code')
@@ -87,9 +112,19 @@ class ManageProject extends Page implements HasTable
                 IconColumn::make('applicable')
                     ->boolean()
                     ->sortable(),
-                SelectColumn::make('ownership_mode')
+                TextColumn::make('ownership_mode')
                     ->label('Ownership')
-                    ->options(collect(OwnershipMode::cases())->mapWithKeys(fn ($m) => [$m->value => $m->label()]))
+                    ->badge()
+                    ->formatStateUsing(fn (OwnershipMode $state) => $state->label())
+                    ->color(fn (OwnershipMode $state) => match ($state) {
+                        OwnershipMode::Internal => 'gray',
+                        OwnershipMode::External => 'info',
+                        OwnershipMode::IncludedElsewhere => 'warning',
+                        OwnershipMode::NotApplicable => 'danger',
+                    })
+                    ->description(fn (PackageInstance $record) => $record->ownership_mode === OwnershipMode::IncludedElsewhere
+                        ? 'In: ' . ($record->includedInPackage?->template?->name ?? 'no package chosen')
+                        : null)
                     ->sortable(),
                 TextColumn::make('topology_label')
                     ->label('Topology')
@@ -113,8 +148,87 @@ class ManageProject extends Page implements HasTable
                     )),
                 TernaryFilter::make('selected'),
                 TernaryFilter::make('applicable'),
+                SelectFilter::make('ownership_mode')
+                    ->label('Ownership')
+                    ->options(self::ownershipOptions()),
+            ])
+            ->recordActions([
+                Actions\Action::make('editOwnership')
+                    ->label('Ownership')
+                    ->icon('heroicon-o-pencil-square')
+                    ->modalHeading(fn (PackageInstance $record) => "Ownership — {$record->template->name}")
+                    ->modalSubmitActionLabel('Save')
+                    ->fillForm(fn (PackageInstance $record) => [
+                        'ownership_mode' => $record->ownership_mode->value,
+                        'included_in_package_id' => $record->included_in_package_id,
+                    ])
+                    ->schema([
+                        Radio::make('ownership_mode')
+                            ->label('Who does this package?')
+                            ->options(self::ownershipOptions())
+                            ->descriptions([
+                                OwnershipMode::Internal->value => 'Built by us: all its activities and milestones are scheduled.',
+                                OwnershipMode::External->value => 'Provided by others: one receipt milestone per output.',
+                                OwnershipMode::IncludedElsewhere->value => 'Covered by another package: its outputs come from that package.',
+                                OwnershipMode::NotApplicable->value => 'Not needed on this project: its outputs aren\'t required.',
+                            ])
+                            ->required()
+                            ->live(),
+                        Select::make('included_in_package_id')
+                            ->label('Included in')
+                            ->helperText('The package whose scope already covers this one. Anything waiting on this package waits on that one instead.')
+                            ->options(fn (PackageInstance $record) => app(PackageLibraryService::class)->containerOptions($record))
+                            ->searchable()
+                            ->required()
+                            ->visible(fn (Get $get) => $get('ownership_mode') === OwnershipMode::IncludedElsewhere->value),
+                    ])
+                    ->action(function (PackageInstance $record, array $data): void {
+                        app(PackageLibraryService::class)->setOwnershipMode(
+                            $record,
+                            OwnershipMode::from($data['ownership_mode']),
+                            isset($data['included_in_package_id']) ? (int) $data['included_in_package_id'] : null,
+                        );
+
+                        Notification::make()
+                            ->title('Ownership updated')
+                            ->body('Build the schedule again to apply it.')
+                            ->success()
+                            ->send();
+                    }),
+            ])
+            ->toolbarActions([
+                BulkAction::make('setOwnership')
+                    ->label('Set ownership')
+                    ->icon('heroicon-o-pencil-square')
+                    ->schema([
+                        Select::make('ownership_mode')
+                            ->label('Ownership')
+                            ->helperText('To include packages in another package, edit them one at a time.')
+                            ->options(collect(self::ownershipOptions())->except(OwnershipMode::IncludedElsewhere->value)->all())
+                            ->required(),
+                    ])
+                    ->action(function (Collection $records, array $data): void {
+                        $mode = OwnershipMode::from($data['ownership_mode']);
+                        $library = app(PackageLibraryService::class);
+                        $records->each(fn (PackageInstance $record) => $library->setOwnershipMode($record, $mode));
+
+                        Notification::make()
+                            ->title('Ownership updated')
+                            ->body("{$records->count()} packages set to {$mode->label()}. Build the schedule again to apply it.")
+                            ->success()
+                            ->send();
+                    })
+                    ->deselectRecordsAfterCompletion(),
             ])
             ->defaultSort('id');
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private static function ownershipOptions(): array
+    {
+        return collect(OwnershipMode::cases())->mapWithKeys(fn (OwnershipMode $m) => [$m->value => $m->label()])->all();
     }
 
     // ── Header Actions ───────────────────────────────────────
@@ -128,7 +242,7 @@ class ManageProject extends Page implements HasTable
                 ->color('gray')
                 ->requiresConfirmation()
                 ->modalDescription('Initialize zone and block configurations from project defaults. You can then customize each block individually.')
-                ->action(fn () => $this->initializeTopology())
+                ->action(fn () => $this->withProjectLock(fn () => $this->initializeTopology()))
                 ->visible(fn () => $this->record->zoneConfigurations()->count() === 0),
 
             Actions\Action::make('instantiate')
@@ -137,7 +251,7 @@ class ManageProject extends Page implements HasTable
                 ->color('info')
                 ->requiresConfirmation()
                 ->modalDescription('This will create package instances from the template library based on project configuration.')
-                ->action(fn () => $this->instantiatePackages())
+                ->action(fn () => $this->withProjectLock(fn () => $this->instantiatePackages()))
                 ->visible(fn () => $this->record->packageInstances()->count() === 0),
 
             Actions\Action::make('buildSchedule')
@@ -145,9 +259,9 @@ class ManageProject extends Page implements HasTable
                 ->icon('heroicon-o-play')
                 ->color('primary')
                 ->requiresConfirmation()
-                ->modalDescription('Resolves dependencies, compiles the schedule and validates it, using the packages as they are set below. The previous compilation is replaced.')
+                ->modalDescription('Resolves dependencies, compiles the schedule and validates it, using the packages as they are set below. The previous compilation is replaced. Large sites take a minute or so; you can keep working while it builds.')
                 ->action(fn () => $this->buildSchedule())
-                ->visible(fn () => $this->record->packageInstances()->exists()),
+                ->visible(fn () => $this->record->packageInstances()->exists() && ! $this->record->isBuilding()),
 
             Actions\ActionGroup::make([
                 Actions\Action::make('applyDeliveryModel')
@@ -155,26 +269,26 @@ class ManageProject extends Page implements HasTable
                     ->icon('heroicon-o-truck')
                     ->requiresConfirmation()
                     ->modalDescription('Applies the delivery model\'s ownership rules to the packages. Ownership you changed by hand on the affected packages is overwritten.')
-                    ->action(fn () => $this->applyDeliveryModel()),
+                    ->action(fn () => $this->withProjectLock(fn () => $this->applyDeliveryModel())),
 
                 Actions\Action::make('resolve')
                     ->label('3. Resolve Dependencies')
                     ->icon('heroicon-o-link')
                     ->requiresConfirmation()
-                    ->action(fn () => $this->resolveDependencies()),
+                    ->action(fn () => $this->withProjectLock(fn () => $this->resolveDependencies())),
 
                 Actions\Action::make('compile')
                     ->label('4. Compile Schedule')
                     ->icon('heroicon-o-cog-6-tooth')
                     ->requiresConfirmation()
                     ->modalDescription('This will generate all activities, relationships, and equipment. Previous compilation will be cleared.')
-                    ->action(fn () => $this->compileGraph())
+                    ->action(fn () => $this->withProjectLock(fn () => $this->compileGraph()))
                     ->visible(fn () => $this->record->providerResolutions()->exists()),
 
                 Actions\Action::make('validate')
                     ->label('5. Validate')
                     ->icon('heroicon-o-check-badge')
-                    ->action(fn () => $this->runValidation())
+                    ->action(fn () => $this->withProjectLock(fn () => $this->runValidation()))
                     ->visible(fn () => $this->record->activityInstances()->exists()),
             ])
                 ->label('Steps')
@@ -346,16 +460,49 @@ class ManageProject extends Page implements HasTable
 
     private function buildSchedule(): void
     {
-        $result = app(ScheduleBuilder::class)->build($this->record);
+        app(ScheduleBuilder::class)->queue($this->record);
         $this->record->refresh();
 
+        // With a sync queue the build has already run.
+        if (! $this->record->isBuilding()) {
+            $this->notifyBuildResult();
+
+            return;
+        }
+
+        $this->watchingBuild = true;
+
         Notification::make()
-            ->title($result['can_export'] ? 'Schedule Built' : 'Schedule Built with Critical Errors')
+            ->title('Build Started')
+            ->body('The schedule is building in the background. This page updates when it finishes.')
+            ->info()
+            ->send();
+    }
+
+    private function notifyBuildResult(): void
+    {
+        $project = $this->record;
+        $summary = $project->build_summary ?? [];
+
+        if ($project->build_status === BuildStatus::Failed) {
+            Notification::make()
+                ->title('Build Failed')
+                ->body($project->build_message)
+                ->danger()
+                ->send();
+
+            return;
+        }
+
+        $canExport = (bool) ($summary['can_export'] ?? false);
+
+        Notification::make()
+            ->title($canExport ? 'Schedule Built' : 'Schedule Built with Critical Errors')
             ->body(
-                "Activities: {$result['activities']}, Relationships: {$result['relationships']}. "
-                . "Critical: {$result['critical']}, Warnings: {$result['warning']}, Notes: {$result['info']}"
+                'Activities: ' . ($summary['activities'] ?? 0) . ', Relationships: ' . ($summary['relationships'] ?? 0) . '. '
+                . 'Critical: ' . ($summary['critical'] ?? 0) . ', Warnings: ' . ($summary['warning'] ?? 0) . ', Notes: ' . ($summary['info'] ?? 0)
             )
-            ->color($result['can_export'] ? 'success' : 'danger')
+            ->color($canExport ? 'success' : 'danger')
             ->send();
     }
 
@@ -404,6 +551,28 @@ class ManageProject extends Page implements HasTable
             ->send();
     }
 
+    /**
+     * Run an engine step while holding the project lock, so two people can't
+     * rebuild or export the same project at once.
+     */
+    private function withProjectLock(callable $work): void
+    {
+        try {
+            app(ProjectLock::class)->run($this->record, $work);
+        } catch (ProjectBusyException $e) {
+            $this->notifyBusy($e);
+        }
+    }
+
+    private function notifyBusy(ProjectBusyException $e): void
+    {
+        Notification::make()
+            ->title('Project Busy')
+            ->body($e->getMessage())
+            ->warning()
+            ->send();
+    }
+
     private function exportAndDownload(string $format): ?\Symfony\Component\HttpFoundation\StreamedResponse
     {
         $exporter = app(ExportService::class);
@@ -412,17 +581,25 @@ class ManageProject extends Page implements HasTable
             $path = $exporter->export($this->record, $format);
             $strategy = $exporter->resolveStrategy($format);
 
+            // Each export has its own temporary file: read it, then remove it.
+            $contents = (string) file_get_contents($path);
+            $exporter->cleanUp($path);
+
             Notification::make()
                 ->title('Export Complete')
                 ->body('Downloading ' . basename($path))
                 ->success()
                 ->send();
 
-            return response()->streamDownload(function () use ($path) {
-                echo file_get_contents($path);
+            return response()->streamDownload(function () use ($contents): void {
+                echo $contents;
             }, basename($path), [
                 'Content-Type' => $strategy->mimeType(),
             ]);
+        } catch (ProjectBusyException $e) {
+            $this->notifyBusy($e);
+
+            return null;
         } catch (\RuntimeException $e) {
             Notification::make()
                 ->title('Export Blocked')

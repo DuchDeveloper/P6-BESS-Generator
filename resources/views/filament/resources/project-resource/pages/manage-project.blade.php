@@ -1,4 +1,33 @@
 <x-filament-panels::page>
+    {{-- Build in progress: poll until it finishes --}}
+    @if ($this->record->isBuilding())
+        @php
+            $waitingSince = $this->record->build_queued_at;
+            $noWorker = $this->record->build_status === \App\Enums\BuildStatus::Queued
+                && $waitingSince !== null && $waitingSince->lt(now()->subSeconds(30));
+        @endphp
+        <div wire:poll.2s="checkBuild"
+             class="flex items-start gap-3 rounded-xl border border-primary-300 bg-primary-50 p-4 dark:border-primary-500/40 dark:bg-primary-500/10">
+            <x-filament::loading-indicator class="mt-0.5 h-5 w-5 text-primary-600 dark:text-primary-400" />
+            <div class="text-sm">
+                <p class="font-semibold text-gray-950 dark:text-white">
+                    Building schedule — {{ $this->record->build_stage ?? $this->record->build_status->label() }}
+                </p>
+                <p class="mt-0.5 text-gray-600 dark:text-gray-400">
+                    Started {{ ($this->record->build_started_at ?? $waitingSince)?->diffForHumans() }}.
+                    You can keep working; this page updates when the build finishes.
+                </p>
+                @if ($noWorker)
+                    <p class="mt-2 text-warning-700 dark:text-warning-400">
+                        Still waiting to start. Builds run on the queue — make sure a worker is running
+                        (<code class="font-mono">php artisan queue:work</code>), or set
+                        <code class="font-mono">QUEUE_CONNECTION=sync</code> in .env to build without one.
+                    </p>
+                @endif
+            </div>
+        </div>
+    @endif
+
     {{-- Project Overview --}}
     <x-filament::section>
         <div class="grid grid-cols-2 gap-4 md:grid-cols-4">
@@ -28,6 +57,22 @@
                 <div class="text-lg">{{ $this->record->start_date->format('Y-m-d') }}</div>
             </div>
         </div>
+
+        @if ($this->record->build_status !== null && ! $this->record->isBuilding())
+            @php
+                $built = $this->record->build_status === \App\Enums\BuildStatus::Succeeded;
+                $canExport = (bool) ($this->record->build_summary['can_export'] ?? false);
+            @endphp
+            <div class="mt-4 flex flex-wrap items-center gap-2 border-t border-gray-200 pt-4 text-sm dark:border-white/10">
+                <span class="font-medium text-gray-500 dark:text-gray-400">Last build</span>
+                <x-filament::badge :color="! $built ? 'danger' : ($canExport ? 'success' : 'warning')" size="sm">
+                    {{ $this->record->build_status->label() }}
+                </x-filament::badge>
+                <span class="text-gray-600 dark:text-gray-400">
+                    {{ $this->record->build_finished_at?->diffForHumans() }}@if ($this->record->build_message) · {{ $this->record->build_message }}@endif
+                </span>
+            </div>
+        @endif
     </x-filament::section>
 
     {{-- Statistics --}}

@@ -6,9 +6,11 @@ namespace App\Models;
 
 use App\Enums\BessArchitecture;
 use App\Enums\BlockSequencingMode;
+use App\Enums\BuildStatus;
 use App\Enums\DeliveryModel;
 use App\Enums\ProjectStatus;
 use App\Enums\RmuTopology;
+use App\Services\Bess\ProjectLock;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -106,6 +108,11 @@ class Project extends Model
         return [
             'delivery_model' => DeliveryModel::class,
             'status' => ProjectStatus::class,
+            'build_status' => BuildStatus::class,
+            'build_summary' => 'array',
+            'build_queued_at' => 'datetime',
+            'build_started_at' => 'datetime',
+            'build_finished_at' => 'datetime',
             'start_date' => 'date',
             'design_freeze_date' => 'date',
             'site_mobilisation_date' => 'date',
@@ -240,5 +247,21 @@ class Project extends Model
     public function basisOfSchedules(): HasMany
     {
         return $this->hasMany(BasisOfSchedule::class);
+    }
+
+    /**
+     * A build is waiting or running. A build that has said nothing for longer
+     * than the project lock lasts is treated as abandoned (e.g. the worker
+     * died), so the project isn't stuck "building" forever.
+     */
+    public function isBuilding(): bool
+    {
+        if ($this->build_status?->inProgress() !== true) {
+            return false;
+        }
+
+        $since = $this->build_started_at ?? $this->build_queued_at;
+
+        return $since !== null && $since->gt(now()->subSeconds(ProjectLock::SECONDS));
     }
 }
