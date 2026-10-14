@@ -32,10 +32,19 @@ Create a project with the wizard (**Projects → New**), then on its **Manage** 
 1. **Init Topology** and **Instantiate Packages** (first time only): zones and
    blocks from the project defaults, then package instances from the template
    library with the conditional flags applied.
-2. Review the package table: select or deselect packages and set ownership.
-3. **Build Schedule**: resolve, compile and validate in one go. Run it again
-   after any change in the table.
+2. Review the package table: select or deselect packages, and use
+   **Ownership** on a row (or **Set ownership** for several) to mark packages
+   external, not applicable, or included in another package.
+3. **Build Schedule**: resolve, compile and validate in one go. It runs in
+   the background; the page shows its progress and tells you when it's done.
+   Run it again after any change in the table.
 4. **Export**: XER, CSV or JSON.
+
+Only one build or export runs per project at a time; a second request is told
+the project is busy. Different projects never wait for each other.
+
+**Calendars** (in the menu) hold working days and public holidays. Pick one on
+the project; it is exported with the XER, so P6 schedules around the holidays.
 
 The **Steps** menu runs the individual engines:
 
@@ -81,6 +90,25 @@ The **Steps** menu runs the individual engines:
 | SuppressedOutputRule: a suppressed package isn't needed by an active one | Critical |
 | BatteryCountReconciliationRule: block battery counts add up to the project total | Critical |
 | MissingCompletionRollupRule: a package completion that drives nothing is a warning; one that only rolls up to its phase closure is a note to review | Warning / Info |
+
+## Running it for a team
+
+`php artisan serve` handles one request at a time, which is fine for one person
+but makes everyone wait while someone builds. For shared use:
+
+1. **Serve through a real web server.** With XAMPP, point an Apache virtual
+   host's document root at this project's `public/` folder.
+2. **Run a queue worker** — builds run as queued jobs:
+   ```bash
+   php artisan queue:work --timeout=900
+   ```
+   Keep it running (on Windows, e.g. with Task Scheduler or NSSM). Without a
+   worker the Manage page says the build is waiting to start. A single user
+   can instead set `QUEUE_CONNECTION=sync` to build inside the request.
+3. **Keep `CACHE_STORE=database`** (or redis/file): the per-project build lock
+   uses it. Never `array` outside tests.
+4. **Production settings:** `APP_ENV=production`, `APP_DEBUG=false`, then
+   `php artisan migrate --force` and `php artisan optimize` after each update.
 
 ## Reports
 
