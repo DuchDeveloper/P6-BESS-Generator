@@ -210,12 +210,17 @@ trait PackageSeederHelper
         $entries = is_string($dependsOn) ? [$dependsOn] : (array) $dependsOn;
 
         foreach ($entries as $entry) {
+            $fallback = null;
+
             if (is_string($entry)) {
                 $key = $entry;
                 $mandatory = true;
             } elseif (is_array($entry) && isset($entry['key'])) {
+                // ['key' => output, 'mandatory' => bool, 'fallback' => output used
+                //  when the project's scope switches the required output off]
                 $key = $entry['key'];
                 $mandatory = (bool) ($entry['mandatory'] ?? true);
+                $fallback = $entry['fallback'] ?? null;
             } else {
                 throw new \InvalidArgumentException(
                     "Invalid depends_on entry for template {$template->code}: " . var_export($entry, true)
@@ -225,6 +230,7 @@ trait PackageSeederHelper
             DependencyRule::create([
                 'consumer_template_id' => $template->id,
                 'required_output_key' => $key,
+                'fallback_output_key' => $fallback,
                 'gates_activity_sequence' => 1,
                 'is_mandatory' => $mandatory,
             ]);

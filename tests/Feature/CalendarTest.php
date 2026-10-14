@@ -73,7 +73,7 @@ it('exports the project calendar to P6 with its holidays', function (): void {
 it('keeps the plain five-day calendar unchanged when there are no holidays', function (): void {
     expect(XerExportStrategy::calendarData([1, 2, 3, 4, 5], []))->toBe(
         '(0||CalendarData()((0||DaysOfWeek()((0||1()())(0||2()((0||0(f|16:00|s|08:00)())))(0||3()((0||0(f|16:00|s|08:00)())))'
-        . '(0||4()((0||0(f|16:00|s|08:00)())))(0||5()((0||0(f|16:00|s|08:00)())))(0||6()((0||0(f|16:00|s|08:00)())))(0||7()())))'
-        . '(0||Exceptions()())))'
+        .'(0||4()((0||0(f|16:00|s|08:00)())))(0||5()((0||0(f|16:00|s|08:00)())))(0||6()((0||0(f|16:00|s|08:00)())))(0||7()())))'
+        .'(0||Exceptions()())))'
     );
 });

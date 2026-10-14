@@ -175,7 +175,9 @@ class CommissioningPackageSeeder extends Seeder
                 'output_key' => 'switchroom_energised',
                 'output_name' => 'Switchroom Energised',
                 'output_type' => OutputType::CompletionMilestone,
-                'depends_on' => ['switchroom_ready_to_energise', 'substation_energised'],
+                // Without a substation (connecting to an existing network
+                // asset) the switchroom's own readiness gates energisation.
+                'depends_on' => ['switchroom_ready_to_energise', ['key' => 'substation_energised', 'mandatory' => false]],
                 'sort_order' => 153,
             ],
             [
@@ -194,7 +196,8 @@ class CommissioningPackageSeeder extends Seeder
                 'output_key' => 'aux_power_available',
                 'output_name' => 'Auxiliary Power Available',
                 'output_type' => OutputType::CompletionMilestone,
-                'depends_on' => 'switchroom_energised',
+                // Without a switchroom, auxiliary power comes from the substation.
+                'depends_on' => [['key' => 'switchroom_energised', 'fallback' => 'substation_energised']],
                 'sort_order' => 154,
             ],
             [

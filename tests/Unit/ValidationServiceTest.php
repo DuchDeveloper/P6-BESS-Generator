@@ -66,6 +66,44 @@ it('passes a freshly generated schedule for every delivery model with no critica
         ->and($this->validator->summary($project)['can_export'])->toBeTrue();
 })->with(DeliveryModel::cases());
 
+it('passes projects whose scope switches parts of the library off', function (array $config): void {
+    $project = compiledProject($config);
+
+    $results = $this->validator->validate($project);
+
+    expect(rulesHit($results, ValidationSeverity::Critical))->toBe([]);
+})->with([
+    'HVAC in the vendor package with a control room' => [['control_room_exists' => true, 'hvac_in_vendor_package' => true]],
+    'no switchroom' => [['switchroom_exists' => false]],
+    'no substation' => [['substation_exists' => false]],
+    'everything switched on' => [[
+        'control_room_exists' => true, 'hvac_in_vendor_package' => true, 'fire_in_vendor_package' => true, 'bess_free_issued' => true,
+        'oam_building_exists' => true, 'guardhouse_exists' => true, 'site_office_exists' => true, 'ablutions_building_exists' => true,
+        'workshop_building_exists' => true, 'fire_pump_house_exists' => true, 'potable_water_exists' => true, 'cctv_security_exists' => true,
+        'access_control_exists' => true, 'public_address_exists' => true, 'site_comms_backbone_exists' => true, 'lightning_protection_site_exists' => true,
+    ]],
+]);
+
+it('notes when a package waits on a fallback output', function (): void {
+    $project = compiledProject(['control_room_exists' => true, 'hvac_in_vendor_package' => true]);
+
+    $note = collect($this->validator->validate($project))
+        ->where('ruleClass', SuppressedOutputRule::class)
+        ->first();
+
+    expect($note->severity)->toBe(ValidationSeverity::Info)
+        ->and($note->message)->toContain("waits on 'bod_concept_ga_approved' because 'hvac_basis_approved' isn't produced");
+});
+
+it('still flags a site with neither a switchroom nor a substation to energise from', function (): void {
+    $project = compiledProject(['switchroom_exists' => false, 'substation_exists' => false]);
+
+    $results = collect($this->validator->validate($project));
+
+    expect($results->where('ruleClass', SuppressedOutputRule::class)->where('severity', ValidationSeverity::Critical)->pluck('context.required_output_key')->all())
+        ->toBe(['switchroom_energised']);
+});
+
 it('flags an activity with no predecessor and no constraint as an open start', function (): void {
     $project = compiledProject();
     $stray = strayActivity($project, 'STRAY-1');

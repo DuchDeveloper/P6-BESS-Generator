@@ -63,6 +63,12 @@ The **Steps** menu runs the individual engines:
   - an **external** package provides it through a boundary receipt milestone;
   - an **included elsewhere** package provides it through its containing package;
   - a **not applicable** package's outputs aren't required at all.
+- **Fallbacks for scope that's switched off.** A dependency can name a
+  fallback output, used when the project's scope switches the required one
+  off. For example: with switchroom HVAC in the vendor package there's no
+  HVAC Basis of Design, so Control Room HVAC design starts from the Basis of
+  Design; without a switchroom, auxiliary power waits on the substation. Each
+  fallback in use is listed as a note after validation.
 - **Design reviews pick up their predecessors dynamically.** Each review is
   linked to every selected discipline package at its maturity level (30 / 60 /
   90 / IFC).

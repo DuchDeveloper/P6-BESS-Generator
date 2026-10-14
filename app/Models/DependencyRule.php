@@ -15,6 +15,7 @@ class DependencyRule extends Model
     protected $fillable = [
         'consumer_template_id',
         'required_output_key',
+        'fallback_output_key',
         'gates_activity_sequence',
         'is_mandatory',
     ];

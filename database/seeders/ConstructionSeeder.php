@@ -84,7 +84,12 @@ class ConstructionSeeder extends Seeder
                 'output_key' => 'tx_civil_signoff',
                 'output_name' => 'Transformer Civil Sign-Off',
                 'output_type' => OutputType::CompletionMilestone,
-                'depends_on' => ['civil_ifc_sr_fdn_approved', 'site_mob_complete'],
+                // No switchroom → no switchroom foundation design; the
+                // transformer pad comes from the equipment pad design.
+                'depends_on' => [
+                    ['key' => 'civil_ifc_sr_fdn_approved', 'fallback' => 'civil_ifc_eqpad_approved'],
+                    'site_mob_complete',
+                ],
                 'sort_order' => 100,
             ],
             [

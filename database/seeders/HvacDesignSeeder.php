@@ -48,15 +48,18 @@ class HvacDesignSeeder extends Seeder
                 'output_suffix' => 'cr_approved',
                 'is_conditional' => true,
                 'condition_flag' => 'control_room_exists',
+                // With switchroom HVAC in the vendor package there's no HVAC
+                // basis package; control room HVAC then starts from the BoD.
+                'entry_anchor' => ['key' => 'hvac_basis_approved', 'fallback' => 'bod_concept_ga_approved'],
                 'sort_order' => 52,
             ],
         ];
 
         foreach ($chains as $chain) {
-            $this->createMaturityChain(array_merge($chain, [
+            $this->createMaturityChain(array_merge([
                 'discipline' => Discipline::Hvac,
                 'entry_anchor' => 'hvac_basis_approved',
-            ]));
+            ], $chain));
         }
     }
 }

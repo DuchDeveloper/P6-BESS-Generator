@@ -82,6 +82,23 @@ class DependencyResolverService
     }
 
     /**
+     * The output a dependency rule waits on in this project: the required
+     * output, or its fallback when the required output isn't provided here
+     * and the fallback is.
+     *
+     * @param  array<string, mixed>  $provided  output keys that have a provider
+     */
+    public static function effectiveOutputKey(DependencyRule $rule, array $provided): string
+    {
+        $required = $rule->required_output_key;
+        $fallback = $rule->fallback_output_key;
+
+        return ! isset($provided[$required]) && $fallback !== null && isset($provided[$fallback])
+            ? $fallback
+            : $required;
+    }
+
+    /**
      * Output keys whose package is marked not_applicable: nothing provides
      * them and nothing needs to.
      *
@@ -163,7 +180,7 @@ class DependencyResolverService
             foreach ($instance->template->dependencyRules as $rule) {
                 $this->resolveOutputKey(
                     $project,
-                    $rule->required_output_key,
+                    self::effectiveOutputKey($rule, $providerMap),
                     $providerMap,
                     $resolutions,
                     $unresolved,

@@ -236,7 +236,8 @@ class GraphCompilerService
             // output_key → the consumer activity sequence it gates
             $gates = [];
             foreach ($consumer->template->dependencyRules as $rule) {
-                $gates[$rule->required_output_key] ??= $rule->gates_activity_sequence ?? 1;
+                $outputKey = DependencyResolverService::effectiveOutputKey($rule, $resolutions->all());
+                $gates[$outputKey] ??= $rule->gates_activity_sequence ?? 1;
             }
             foreach ($dynamicDeps[$consumer->id] ?? [] as $outputKey) {
                 $gates[$outputKey] ??= 1;

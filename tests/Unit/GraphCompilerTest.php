@@ -141,3 +141,14 @@ it('compiles every BESS architecture and RMU layout without loops', function (ar
     'two-level RMU' => [['rmu_topology' => 'per_sut_and_block', 'blocks_per_zone' => 2]],
     'per-zone RMU' => [['rmu_topology' => 'per_zone', 'zone_count' => 2, 'blocks_per_zone' => 2]],
 ]);
+
+it('waits on a fallback output when the project scope switches the required one off', function (array $config, string $consumer, string $fallbackProvider): void {
+    $project = compiledProject($config);
+
+    expect(predecessorCodes(activityCoded($project, $consumer)))->toContain($fallbackProvider)
+        ->and(scheduleIsAcyclic($project))->toBeTrue();
+})->with([
+    'control room HVAC without an HVAC basis' => [['control_room_exists' => true, 'hvac_in_vendor_package' => true], 'HVAC-CR-30-001', 'BOD-CONCEPT-GA-006'],
+    'transformer civil without a switchroom' => [['switchroom_exists' => false], 'CON-TX-CIVIL-001', 'CIVIL-EQPAD-IFC-006'],
+    'auxiliary power without a switchroom' => [['switchroom_exists' => false], 'MS-AUX-POWER-001', 'MS-SUBSTATION-ENERGISED-001'],
+]);
