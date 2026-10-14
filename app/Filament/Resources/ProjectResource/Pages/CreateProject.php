@@ -7,6 +7,7 @@ namespace App\Filament\Resources\ProjectResource\Pages;
 use App\Enums\BlockSequencingMode;
 use App\Enums\DeliveryModel;
 use App\Filament\Resources\ProjectResource;
+use App\Models\Calendar;
 use App\Filament\Resources\ProjectResource\Schemas\TopologyHelp;
 use App\Services\Bess\ProjectSetupService;
 use Filament\Forms\Components\DatePicker;
@@ -71,6 +72,15 @@ class CreateProject extends CreateRecord
                                 ->required()
                                 ->native(false)
                                 ->default(now()->addMonth()->startOfWeek()),
+                        ]),
+                        Grid::make(2)->schema([
+                            Select::make('calendar_id')
+                                ->label('Work calendar')
+                                ->options(fn () => Calendar::orderBy('name')->pluck('name', 'id'))
+                                ->default(fn () => Calendar::where('is_default', true)->value('id'))
+                                ->placeholder('Standard 5-day week')
+                                ->helperText('Working days and public holidays, exported with the XER. Manage them under Calendars.')
+                                ->native(false),
                         ]),
                         Textarea::make('description')
                             ->rows(3)

@@ -18,14 +18,7 @@ class ProjectSetupService
      */
     public function createProject(array $config): Project
     {
-        $calendar = Calendar::firstOrCreate(
-            ['name' => $config['calendar_name'] ?? '5 Day Workweek'],
-            [
-                'workdays_per_week' => $config['workdays_per_week'] ?? 5,
-                'working_days' => $config['working_days'] ?? [1, 2, 3, 4, 5],
-                'is_default' => true,
-            ]
-        );
+        $calendar = $this->calendarFor($config);
 
         $project = Project::create([
             'name' => $config['name'],
@@ -94,6 +87,29 @@ class ProjectSetupService
         $this->buildWbsSkeleton($project);
 
         return $project;
+    }
+
+    /**
+     * The chosen calendar, else the default one, else a standard 5-day week.
+     */
+    private function calendarFor(array $config): Calendar
+    {
+        if (! empty($config['calendar_id']) && ($chosen = Calendar::find($config['calendar_id'])) !== null) {
+            return $chosen;
+        }
+
+        if (empty($config['calendar_name']) && ($default = Calendar::where('is_default', true)->first()) !== null) {
+            return $default;
+        }
+
+        return Calendar::firstOrCreate(
+            ['name' => $config['calendar_name'] ?? '5 Day Workweek'],
+            [
+                'workdays_per_week' => $config['workdays_per_week'] ?? 5,
+                'working_days' => $config['working_days'] ?? [1, 2, 3, 4, 5],
+                'is_default' => true,
+            ]
+        );
     }
 
     /**

@@ -109,38 +109,50 @@ class XerExportStrategy implements ExportStrategy
     {
         $calendar = $project->calendar;
         $hoursPerDay = 8;
-        $workDays = $calendar?->workdays_per_week ?? 5;
-        $weekHours = $workDays * $hoursPerDay;
-
-        // Build P6-compatible calendar data with DaysOfWeek structure
-        // Mon-Fri working (08:00-16:00), Sat-Sun off
-        $clndrData = '(0||CalendarData()((0||DaysOfWeek()('
-            . '(0||1()())' // Sunday - non-working
-            . '(0||2()((0||0(f|16:00|s|08:00)())))' // Monday
-            . '(0||3()((0||0(f|16:00|s|08:00)())))' // Tuesday
-            . '(0||4()((0||0(f|16:00|s|08:00)())))' // Wednesday
-            . '(0||5()((0||0(f|16:00|s|08:00)())))' // Thursday
-            . '(0||6()((0||0(f|16:00|s|08:00)())))'; // Friday
-
-        if ($workDays >= 6) {
-            $clndrData .= '(0||7()((0||0(f|16:00|s|08:00)())))'; // Saturday working
-        } else {
-            $clndrData .= '(0||7()())'; // Saturday non-working
-        }
-
-        $clndrData .= '))(0||Exceptions()())))';
+        $workingDays = $calendar?->workingDays() ?? [1, 2, 3, 4, 5];
+        $weekHours = count($workingDays) * $hoursPerDay;
 
         $lines[] = $this->line('%T', 'CALENDAR');
         $lines[] = $this->line('%F', 'clndr_id', 'default_flag', 'clndr_name', 'proj_id', 'base_clndr_id', 'last_chng_date', 'clndr_type', 'day_hr_cnt', 'week_hr_cnt', 'month_hr_cnt', 'year_hr_cnt', 'rsrc_private', 'clndr_data');
         $lines[] = $this->line('%R',
             (string)$this->calendarId, 'Y',
-            $calendar?->name ?? 'Standard Work Week',
+            $this->sanitize($calendar?->name ?? 'Standard Work Week'),
             '', '', // proj_id and base_clndr_id empty for global calendar
             '2000-05-23 16:14', 'CA_Base',
             (string)$hoursPerDay, (string)$weekHours,
             (string)($weekHours * 4), (string)($weekHours * 52),
-            'N', $clndrData
+            'N', self::calendarData($workingDays, $calendar?->holidayDates() ?? [])
         );
+    }
+
+    /**
+     * P6 clndr_data: the working pattern for each weekday (08:00–16:00 on
+     * working days) and one non-working exception per holiday.
+     *
+     * P6 numbers weekdays 1 = Sunday … 7 = Saturday and dates as days since
+     * 1899-12-30 (the spreadsheet serial date).
+     *
+     * @param  list<int>  $workingDays  ISO weekdays (1 = Monday … 7 = Sunday)
+     * @param  list<\Carbon\CarbonInterface>  $holidays
+     */
+    public static function calendarData(array $workingDays, array $holidays): string
+    {
+        $days = '';
+        for ($p6Day = 1; $p6Day <= 7; $p6Day++) {
+            $isoDay = $p6Day === 1 ? 7 : $p6Day - 1;
+            $days .= in_array($isoDay, $workingDays, true)
+                ? "(0||{$p6Day}()((0||0(f|16:00|s|08:00)())))"
+                : "(0||{$p6Day}()())";
+        }
+
+        $epoch = Carbon::create(1899, 12, 30)->startOfDay();
+        $exceptions = '';
+        foreach (array_values($holidays) as $index => $holiday) {
+            $serial = (int) $epoch->diffInDays(Carbon::parse($holiday->toDateString())->startOfDay());
+            $exceptions .= "(0||{$index}(d|{$serial})())";
+        }
+
+        return '(0||CalendarData()((0||DaysOfWeek()(' . $days . '))(0||Exceptions()(' . $exceptions . '))))';
     }
 
     private function addProjectTable(array &$lines, Project $project): void
