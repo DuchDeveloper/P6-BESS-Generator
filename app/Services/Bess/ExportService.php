@@ -10,24 +10,51 @@ use App\Services\Bess\Export\ExcelExportStrategy;
 use App\Services\Bess\Export\ExportStrategy;
 use App\Services\Bess\Export\JsonExportStrategy;
 use App\Services\Bess\Export\XerExportStrategy;
+use Illuminate\Support\Str;
 use RuntimeException;
 
 class ExportService
 {
     public function __construct(
         private readonly ValidationService $validationService,
+        private readonly ProjectLock $lock,
     ) {}
 
     /**
      * Export a project schedule. Validates the schedule as it stands first and
      * blocks on critical errors (CLAUDE.md §1, §15).
      *
+     * Each export without an explicit $outputPath gets its own directory under
+     * storage/app/exports, so simultaneous exports never overwrite each other;
+     * the caller deletes it once the file is sent (see cleanUp()).
+     *
+     * @throws ProjectBusyException if a build or another export is running for the project
      * @throws RuntimeException if the schedule isn't compiled or has critical validation errors
      */
     public function export(Project $project, string $format = 'xer', ?string $outputPath = null): string
     {
         $strategy = $this->resolveStrategy($format);
 
+        return $this->lock->run($project, fn (): string => $this->exportUnlocked($project, $strategy, $outputPath));
+    }
+
+    /**
+     * Delete an export file and, if it was given its own directory, that too.
+     */
+    public function cleanUp(string $filePath): void
+    {
+        if (is_file($filePath)) {
+            unlink($filePath);
+        }
+
+        $directory = dirname($filePath);
+        if (str_starts_with($directory, storage_path('app/exports') . DIRECTORY_SEPARATOR) && is_dir($directory) && count(scandir($directory)) === 2) {
+            rmdir($directory);
+        }
+    }
+
+    private function exportUnlocked(Project $project, ExportStrategy $strategy, ?string $outputPath): string
+    {
         if (! $project->activityInstances()->exists()) {
             throw new RuntimeException('Cannot export: compile the schedule first.');
         }
@@ -44,7 +71,7 @@ class ExportService
             );
         }
 
-        $outputPath ??= storage_path('app/exports');
+        $outputPath ??= storage_path('app/exports/' . Str::uuid()->toString());
 
         if (!is_dir($outputPath)) {
             mkdir($outputPath, 0755, true);

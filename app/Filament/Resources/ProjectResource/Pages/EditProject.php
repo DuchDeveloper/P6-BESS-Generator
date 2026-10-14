@@ -8,7 +8,10 @@ use App\Enums\BessArchitecture;
 use App\Enums\BlockSequencingMode;
 use App\Enums\DeliveryModel;
 use App\Filament\Resources\ProjectResource;
+use App\Models\Calendar;
 use App\Filament\Resources\ProjectResource\Schemas\TopologyHelp;
+use App\Services\Bess\ProjectBusyException;
+use App\Services\Bess\ProjectLock;
 use App\Services\Bess\TopologyService;
 use Filament\Actions;
 use Filament\Forms\Components\DatePicker;
@@ -44,6 +47,12 @@ class EditProject extends EditRecord
                         Grid::make(2)->schema([
                             TextInput::make('client')->maxLength(255),
                             DatePicker::make('start_date')->required()->native(false),
+                            Select::make('calendar_id')
+                                ->label('Work calendar')
+                                ->options(fn () => Calendar::orderBy('name')->pluck('name', 'id'))
+                                ->placeholder('Standard 5-day week')
+                                ->helperText('Working days and public holidays, exported with the XER. Manage them under Calendars.')
+                                ->native(false),
                         ]),
                         Textarea::make('description')->rows(3),
                     ]),
@@ -286,7 +295,17 @@ class EditProject extends EditRecord
             return;
         }
 
-        app(TopologyService::class)->initializeFromDefaults($this->record);
+        try {
+            app(ProjectLock::class)->run($this->record, fn () => app(TopologyService::class)->initializeFromDefaults($this->record));
+        } catch (ProjectBusyException $e) {
+            Notification::make()
+                ->title('Zones and blocks not updated')
+                ->body('A build is running for this project. Save again when it finishes to apply the new counts.')
+                ->warning()
+                ->send();
+
+            return;
+        }
 
         Notification::make()
             ->title('Zones and blocks updated')
