@@ -12,7 +12,6 @@ use App\Enums\OwnershipMode;
 use App\Enums\P6TaskType;
 use App\Enums\ProjectStatus;
 use App\Enums\RelationshipOrigin;
-use App\Enums\RelationshipType;
 use App\Enums\ResolutionType;
 use App\Enums\WbsCategory;
 use App\Models\ActivityInstance;
@@ -31,6 +30,9 @@ class GraphCompilerService
 {
     /** Activity code of the single terminal milestone every phase closure rolls up to. */
     public const PROJECT_COMPLETE_CODE = 'PROJECT-COMPLETE';
+
+    /** Batches every relationship this compile creates. */
+    private RelationshipWriter $relationships;
 
     public function __construct(
         private readonly ProjectSetupService $setupService,
@@ -53,6 +55,7 @@ class GraphCompilerService
         DB::transaction(function () use ($project): void {
             // Clear previous compilation
             $this->clearCompilation($project);
+            $this->relationships = new RelationshipWriter($project);
 
             $activePackages = PackageInstance::where('project_id', $project->id)
                 ->where('selected', true)
@@ -63,12 +66,13 @@ class GraphCompilerService
 
             // Stage 1: Instantiate activities from templates
             $this->instantiateActivities($project, $activePackages);
+            $activitiesByPackage = ActivityInstance::where('project_id', $project->id)->get()->groupBy('package_instance_id');
 
             // Stage 2: Build internal relationships (within packages)
-            $this->buildInternalRelationships($project, $activePackages);
+            $this->buildInternalRelationships($activePackages, $activitiesByPackage);
 
             // Stage 2b: Fan in DAG leaves into each package's completion milestone
-            $this->fanInPackageLeavesToCompletionMilestone($project, $activePackages);
+            $this->fanInPackageLeavesToCompletionMilestone($activePackages, $activitiesByPackage);
 
             // Stage 3: Generate boundary milestones for external packages. Runs
             // before Stage 4 so the receipt milestones exist to be linked.
@@ -82,13 +86,14 @@ class GraphCompilerService
 
             // Stage 6: Generate topology activities (Battery, PCS, SUT per WBS.md)
             $archConfig = $this->buildArchitectureConfig($project);
-            $this->topologyActivityGenerator->generate($project, $archConfig);
+            $this->topologyActivityGenerator->generate($project, $archConfig, $this->relationships);
 
             // Stage 7: Generate interface records
             $this->generateInterfaceActivities($project);
 
             // Stage 8: Roll dangling milestones up to phase closures
             $this->generateRollupClosures($project);
+            $this->relationships->flush();
 
             // Stage 9: Set project start constraints
             $this->setProjectStartConstraint($project);
@@ -105,76 +110,62 @@ class GraphCompilerService
      */
     private function instantiateActivities(Project $project, $activePackages): void
     {
-        $activityCodeCounter = 1;
+        $now = now();
+        $rows = [];
 
         foreach ($activePackages as $instance) {
-            // External packages don't get activities — they get boundary milestones in Stage 3
-            if ($instance->ownership_mode === OwnershipMode::External) {
-                continue;
-            }
-
-            // NotApplicable and IncludedElsewhere skip activity generation
+            // External packages get boundary milestones in Stage 3; NotApplicable
+            // and IncludedElsewhere packages get nothing.
             if (!$instance->ownership_mode->generatesActivities()) {
                 continue;
             }
 
-            foreach ($instance->template->activityTemplates as $actTemplate) {
-                $codePrefix = $this->buildActivityCodePrefix($instance);
+            $codePrefix = $this->buildActivityCodePrefix($instance);
 
-                ActivityInstance::create([
+            foreach ($instance->template->activityTemplates as $actTemplate) {
+                $rows[] = [
                     'project_id' => $project->id,
                     'package_instance_id' => $instance->id,
                     'wbs_node_id' => $instance->wbs_node_id,
                     'activity_code' => sprintf('%s-%03d', $codePrefix, $actTemplate->sequence),
                     'name' => $this->buildActivityName($instance, $actTemplate->name),
                     'duration_days' => $actTemplate->is_milestone ? 0 : $actTemplate->duration_days,
-                    'is_milestone' => $actTemplate->is_milestone,
+                    'is_milestone' => (bool) $actTemplate->is_milestone,
                     'sequence' => $actTemplate->sequence,
-                    'p6_task_type' => $actTemplate->p6_task_type,
-                ]);
+                    'p6_task_type' => ($actTemplate->p6_task_type ?? P6TaskType::Task)->value,
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ];
             }
+        }
 
-            $activityCodeCounter++;
+        // One insert per few hundred activities instead of one per activity.
+        foreach (array_chunk($rows, 500) as $chunk) {
+            ActivityInstance::insert($chunk);
         }
     }
 
     /**
      * Stage 2: Build FS relationships within each package (activity N → activity N+1).
      */
-    private function buildInternalRelationships(Project $project, $activePackages): void
+    private function buildInternalRelationships(Collection $activePackages, Collection $activitiesByPackage): void
     {
         foreach ($activePackages as $instance) {
             if (!$instance->ownership_mode->generatesActivities()) {
                 continue;
             }
 
-            $activities = ActivityInstance::where('package_instance_id', $instance->id)
-                ->orderBy('sequence')
-                ->get();
+            $activities = $activitiesByPackage->get($instance->id, collect())->keyBy('sequence');
+            $templates = $instance->template->activityTemplates->keyBy('sequence');
 
-            foreach ($activities as $activity) {
+            foreach ($activities as $sequence => $activity) {
                 // Find predecessor within same package by sequence reference
-                $predSequence = $instance->template->activityTemplates
-                    ->firstWhere('sequence', $activity->sequence)
-                    ?->predecessor_sequence;
+                $predSequence = $templates->get($sequence)?->predecessor_sequence;
+                $predecessor = $predSequence !== null ? $activities->get($predSequence) : null;
 
-                if ($predSequence === null) {
-                    continue;
+                if ($predecessor !== null) {
+                    $this->relationships->link($predecessor->id, $activity->id);
                 }
-
-                $predecessor = $activities->firstWhere('sequence', $predSequence);
-                if ($predecessor === null) {
-                    continue;
-                }
-
-                Relationship::create([
-                    'project_id' => $project->id,
-                    'predecessor_id' => $predecessor->id,
-                    'successor_id' => $activity->id,
-                    'relationship_type' => RelationshipType::FinishToStart,
-                    'lag_days' => 0,
-                    'origin' => RelationshipOrigin::Internal,
-                ]);
             }
         }
     }
@@ -191,53 +182,24 @@ class GraphCompilerService
      * `predecessor_sequence`, which can only chain one path into the anchor.
      * This stage fans the remaining leaves in.
      */
-    private function fanInPackageLeavesToCompletionMilestone(Project $project, $activePackages): void
+    private function fanInPackageLeavesToCompletionMilestone(Collection $activePackages, Collection $activitiesByPackage): void
     {
         foreach ($activePackages as $instance) {
             if (!$instance->ownership_mode->generatesActivities()) {
                 continue;
             }
 
-            $activities = ActivityInstance::where('package_instance_id', $instance->id)->get();
-            if ($activities->isEmpty()) {
-                continue;
-            }
-
-            $anchor = $this->completionAnchor($instance, $activities);
+            $activities = $activitiesByPackage->get($instance->id, collect());
+            $anchor = $activities->isEmpty() ? null : $this->completionAnchor($instance, $activities);
 
             if ($anchor === null) {
                 continue;
             }
 
-            $candidateLeaves = $activities->where('id', '!==', $anchor->id);
-            if ($candidateLeaves->isEmpty()) {
-                continue;
-            }
-
-            $idsWithSuccessors = Relationship::whereIn('predecessor_id', $candidateLeaves->pluck('id'))
-                ->pluck('predecessor_id')
-                ->unique();
-
-            $leafActivities = $candidateLeaves->whereNotIn('id', $idsWithSuccessors);
-
-            foreach ($leafActivities as $leaf) {
-                if ($leaf->id === $anchor->id) {
-                    continue;
+            foreach ($activities as $leaf) {
+                if ($leaf->id !== $anchor->id && ! $this->relationships->hasSuccessor($leaf->id)) {
+                    $this->relationships->link($leaf->id, $anchor->id);
                 }
-                $exists = Relationship::where('predecessor_id', $leaf->id)
-                    ->where('successor_id', $anchor->id)
-                    ->exists();
-                if ($exists) {
-                    continue;
-                }
-                Relationship::create([
-                    'project_id' => $project->id,
-                    'predecessor_id' => $leaf->id,
-                    'successor_id' => $anchor->id,
-                    'relationship_type' => RelationshipType::FinishToStart,
-                    'lag_days' => 0,
-                    'origin' => RelationshipOrigin::Internal,
-                ]);
             }
         }
     }
@@ -263,11 +225,6 @@ class GraphCompilerService
         $activitiesByPackage = $activities->groupBy('package_instance_id');
         $packagesById = $activePackages->keyBy('id');
         $dynamicDeps = $this->dependencyResolver->gatherDynamicPredecessors($activePackages);
-
-        $linked = Relationship::where('project_id', $project->id)
-            ->get(['predecessor_id', 'successor_id'])
-            ->mapWithKeys(fn (Relationship $r) => ["{$r->predecessor_id}:{$r->successor_id}" => true])
-            ->all();
 
         foreach ($activePackages as $consumer) {
             /** @var Collection<int, ActivityInstance> $consumerActivities */
@@ -307,20 +264,7 @@ class GraphCompilerService
                         continue;
                     }
 
-                    $key = "{$providerActivity->id}:{$consumerActivity->id}";
-                    if (isset($linked[$key])) {
-                        continue;
-                    }
-
-                    Relationship::create([
-                        'project_id' => $project->id,
-                        'predecessor_id' => $providerActivity->id,
-                        'successor_id' => $consumerActivity->id,
-                        'relationship_type' => RelationshipType::FinishToStart,
-                        'lag_days' => 0,
-                        'origin' => RelationshipOrigin::Dependency,
-                    ]);
-                    $linked[$key] = true;
+                    $this->relationships->link($providerActivity->id, $consumerActivity->id, origin: RelationshipOrigin::Dependency);
                 }
             }
         }
@@ -592,15 +536,11 @@ class GraphCompilerService
      */
     private function generateRollupClosures(Project $project): void
     {
-        $drivers = Relationship::where('project_id', $project->id)
-            ->pluck('predecessor_id')
-            ->flip();
-
         $dangling = ActivityInstance::where('project_id', $project->id)
             ->where('is_milestone', true)
             ->orderBy('id')
             ->get()
-            ->reject(fn (ActivityInstance $a) => $drivers->has($a->id));
+            ->reject(fn (ActivityInstance $a) => $this->relationships->hasSuccessor($a->id));
 
         if ($dangling->isEmpty()) {
             return;
@@ -669,14 +609,7 @@ class GraphCompilerService
 
     private function rollup(Project $project, ActivityInstance $from, ActivityInstance $to): void
     {
-        Relationship::create([
-            'project_id' => $project->id,
-            'predecessor_id' => $from->id,
-            'successor_id' => $to->id,
-            'relationship_type' => RelationshipType::FinishToStart,
-            'lag_days' => 0,
-            'origin' => RelationshipOrigin::Rollup,
-        ]);
+        $this->relationships->link($from->id, $to->id, origin: RelationshipOrigin::Rollup);
     }
 
     /**

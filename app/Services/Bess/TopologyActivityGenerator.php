@@ -7,7 +7,6 @@ namespace App\Services\Bess;
 use App\Enums\BlockSequencingMode;
 use App\Enums\EquipmentNodeType;
 use App\Enums\P6TaskType;
-use App\Enums\RelationshipOrigin;
 use App\Enums\RelationshipType;
 use App\Enums\WbsCategory;
 use App\Models\ActivityInstance;
@@ -16,7 +15,6 @@ use App\Models\EquipmentNode;
 use App\Models\PackageInstance;
 use App\Models\PackageTemplate;
 use App\Models\Project;
-use App\Models\Relationship;
 use App\Models\WbsNode;
 
 /**
@@ -75,10 +73,31 @@ class TopologyActivityGenerator
     /** @var array Architecture configuration from GraphCompilerService */
     private array $archConfig = [];
 
-    public function generate(Project $project, array $archConfig = []): void
+    private RelationshipWriter $relationships;
+
+    /** @var array<string, WbsNode> WBS nodes already found or created, keyed "parent|name" */
+    private array $wbsCache = [];
+
+    /**
+     * @param  RelationshipWriter|null  $relationships  The compiler's writer; links are flushed by the caller.
+     *                                                  Without one, the generator writes its own links.
+     */
+    public function generate(Project $project, array $archConfig = [], ?RelationshipWriter $relationships = null): void
     {
         $this->activityMap = [];
         $this->archConfig = $archConfig;
+        $this->wbsCache = [];
+        $this->relationships = $relationships ?? new RelationshipWriter($project);
+
+        $this->generateTopology($project);
+
+        if ($relationships === null) {
+            $this->relationships->flush();
+        }
+    }
+
+    private function generateTopology(Project $project): void
+    {
 
         $blocks = BlockConfiguration::where('project_id', $project->id)
             ->with('zoneConfiguration')
@@ -1496,10 +1515,7 @@ class TopologyActivityGenerator
         // Remove the now-redundant direct edge — the new chain provides the
         // dependency through every block's live-energisation sign-off.
         if ($firstEnergise !== null && $onlineCommReady !== null) {
-            Relationship::where('project_id', $project->id)
-                ->where('predecessor_id', $firstEnergise->id)
-                ->where('successor_id', $onlineCommReady->id)
-                ->delete();
+            $this->relationships->unlink($firstEnergise->id, $onlineCommReady->id);
         }
     }
 
@@ -1571,10 +1587,7 @@ class TopologyActivityGenerator
 
         // Remove the now-redundant direct edge — the new chain provides
         // the dependency through the online commissioning activities.
-        Relationship::where('project_id', $project->id)
-            ->where('predecessor_id', $onlineCommReady->id)
-            ->where('successor_id', $holdPoint1->id)
-            ->delete();
+        $this->relationships->unlink($onlineCommReady->id, $holdPoint1->id);
     }
 
     private function createActivity(
@@ -1622,14 +1635,7 @@ class TopologyActivityGenerator
         RelationshipType $type = RelationshipType::FinishToStart,
         int $lagDays = 0,
     ): void {
-        Relationship::create([
-            'project_id' => $project->id,
-            'predecessor_id' => $predecessor->id,
-            'successor_id' => $successor->id,
-            'relationship_type' => $type,
-            'lag_days' => $lagDays,
-            'origin' => RelationshipOrigin::Internal,
-        ]);
+        $this->relationships->link($predecessor->id, $successor->id, $type, $lagDays);
     }
 
     /**
@@ -1689,30 +1695,38 @@ class TopologyActivityGenerator
 
     private function linkIfNotExists(Project $project, ActivityInstance $predecessor, ActivityInstance $successor): void
     {
-        $exists = Relationship::where('predecessor_id', $predecessor->id)
-            ->where('successor_id', $successor->id)
-            ->exists();
-
-        if (!$exists) {
-            $this->link($project, $predecessor, $successor);
-        }
+        // The writer links a pair at most once.
+        $this->link($project, $predecessor, $successor);
     }
 
     private function ensureWbs(Project $project, WbsNode $parent, string $name, int $level): WbsNode
     {
-        return WbsNode::firstOrCreate(
-            [
+        $key = $parent->id . '|' . $name;
+
+        if (isset($this->wbsCache[$key])) {
+            return $this->wbsCache[$key];
+        }
+
+        $node = WbsNode::where('project_id', $project->id)
+            ->where('parent_id', $parent->id)
+            ->where('name', $name)
+            ->first();
+
+        if ($node === null) {
+            $position = $parent->children()->count() + 1;
+
+            $node = WbsNode::create([
                 'project_id' => $project->id,
                 'parent_id' => $parent->id,
                 'name' => $name,
-            ],
-            [
-                'code' => $parent->code . '.' . ($parent->children()->count() + 1),
+                'code' => $parent->code . '.' . $position,
                 'level' => $level,
-                'sort_order' => $parent->children()->count() + 1,
+                'sort_order' => $position,
                 'wbs_category' => WbsCategory::Construction,
-            ]
-        );
+            ]);
+        }
+
+        return $this->wbsCache[$key] = $node;
     }
 
     private function scaleDuration(int $baseDuration, float $ratio): int
